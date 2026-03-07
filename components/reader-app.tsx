@@ -3,9 +3,9 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { calculateReadingCost } from "@/lib/costs";
-import { findActiveTokenIndex, ReadingToken } from "@/lib/reader";
+import { ReadingToken } from "@/lib/reader";
 import { DEFAULT_VOICE, TTS_VOICES, TtsVoice } from "@/lib/tts";
-import { LibraryListItem, SavedChunk } from "@/lib/library";
+import { LibraryListItem, SavedChunk, deriveTitle } from "@/lib/library";
 import {
   deleteEntry as deleteLibraryEntry,
   getEntry as getLibraryEntry,
@@ -19,12 +19,19 @@ type AudioChunk = {
   audioUrl: string;
   audioBlob: Blob;
   tokens: ReadingToken[];
+  duration: number;
 };
 
 function base64ToBlob(base64: string, mimeType: string) {
   const binary = atob(base64);
   const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
   return new Blob([bytes], { type: mimeType });
+}
+
+function formatTime(seconds: number) {
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
 type ReaderAppProps = {
@@ -38,7 +45,6 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
   const [isLoading, setIsLoading] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [currentTime, setCurrentTime] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [lastRenderedText, setLastRenderedText] = useState("");
   const [lastRenderedVoice, setLastRenderedVoice] = useState<TtsVoice>(DEFAULT_VOICE);
@@ -50,6 +56,10 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
   const [currentChunkIndex, setCurrentChunkIndex] = useState(0);
   const [totalChunks, setTotalChunks] = useState(0);
 
+  // Progress tracking
+  const [currentTime, setCurrentTime] = useState(0);
+  const [chunkCurrentTime, setChunkCurrentTime] = useState(0);
+
   // Library state
   const [library, setLibrary] = useState<LibraryListItem[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -59,19 +69,15 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
   const [isSigningOut, setIsSigningOut] = useState(false);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const readingContainerRef = useRef<HTMLDivElement | null>(null);
-  const tokenRefs = useRef<Array<HTMLSpanElement | null>>([]);
   const chunksRef = useRef<AudioChunk[]>([]);
   const currentChunkIndexRef = useRef(0);
   const waitingForNextChunk = useRef(false);
-  const rafRef = useRef<number | null>(null);
-  const playbackRateRef = useRef(1);
   const playRequestIdRef = useRef(0);
+  const progressRef = useRef<HTMLInputElement | null>(null);
 
   // Keep refs in sync
   useEffect(() => { chunksRef.current = chunks; }, [chunks]);
   useEffect(() => { currentChunkIndexRef.current = currentChunkIndex; }, [currentChunkIndex]);
-  useEffect(() => { playbackRateRef.current = playbackRate; }, [playbackRate]);
 
   // Load library on mount
   useEffect(() => {
@@ -86,25 +92,27 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
     }
   }
 
+  // Compute durations
+  const chunkDurations = useMemo(() => chunks.map((c) => c.duration), [chunks]);
+  const totalDuration = useMemo(() => chunkDurations.reduce((a, b) => a + b, 0), [chunkDurations]);
+  const chunkStartTimes = useMemo(() => {
+    const starts: number[] = [];
+    let acc = 0;
+    for (const d of chunkDurations) {
+      starts.push(acc);
+      acc += d;
+    }
+    return starts;
+  }, [chunkDurations]);
+
+  // Overall progress
+  const overallTime = useMemo(() => {
+    if (chunks.length === 0) return 0;
+    return (chunkStartTimes[currentChunkIndex] ?? 0) + chunkCurrentTime;
+  }, [chunks, currentChunkIndex, chunkCurrentTime, chunkStartTimes]);
+
   // Build flat token array from all received chunks
   const allTokens = useMemo(() => chunks.flatMap((c) => c.tokens), [chunks]);
-
-  const currentChunkTokenOffset = useMemo(() => {
-    let offset = 0;
-    for (let i = 0; i < currentChunkIndex; i++) {
-      if (chunks[i]) offset += chunks[i].tokens.length;
-    }
-    return offset;
-  }, [chunks, currentChunkIndex]);
-
-  const localActiveIndex = useMemo(() => {
-    const chunkTokens = chunks[currentChunkIndex]?.tokens ?? [];
-    return findActiveTokenIndex(chunkTokens, currentTime);
-  }, [chunks, currentChunkIndex, currentTime]);
-
-  const globalActiveIndex = localActiveIndex >= 0
-    ? currentChunkTokenOffset + localActiveIndex
-    : -1;
 
   const normalizedInputText = text.trim();
   const charCount = text.length;
@@ -115,41 +123,16 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
   const hasText = normalizedInputText.length > 0;
   const costEstimate = useMemo(() => calculateReadingCost(text, null), [text]);
   const canSave = hasAudio && !isStreaming && !isAutoSaving && !activeEntryId;
-  const inputCollapsed = isPlaying && hasAudio;
+
+  const title = useMemo(() => {
+    if (lastRenderedText) return deriveTitle(lastRenderedText);
+    if (hasText) return deriveTitle(text);
+    return "";
+  }, [lastRenderedText, hasText, text]);
 
   useEffect(() => {
     if (audioRef.current) audioRef.current.playbackRate = playbackRate;
   }, [playbackRate]);
-
-  const syncCurrentTime = useCallback(() => {
-    const audio = audioRef.current;
-
-    if (!audio) {
-      rafRef.current = null;
-      return;
-    }
-
-    const leadSeconds = Math.min(0.04 * playbackRateRef.current, 0.12);
-    setCurrentTime(audio.currentTime + leadSeconds);
-
-    if (!audio.paused && !audio.ended) {
-      rafRef.current = requestAnimationFrame(syncCurrentTime);
-    } else {
-      rafRef.current = null;
-    }
-  }, []);
-
-  function startTimeTracking() {
-    if (rafRef.current !== null) return;
-    rafRef.current = requestAnimationFrame(syncCurrentTime);
-  }
-
-  function stopTimeTracking() {
-    if (rafRef.current !== null) {
-      cancelAnimationFrame(rafRef.current);
-      rafRef.current = null;
-    }
-  }
 
   function invalidatePlayRequests() {
     playRequestIdRef.current += 1;
@@ -157,10 +140,7 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
 
   async function safePlayAudio() {
     const audio = audioRef.current;
-
-    if (!audio) {
-      return;
-    }
+    if (!audio) return;
 
     const requestId = playRequestIdRef.current + 1;
     playRequestIdRef.current = requestId;
@@ -168,14 +148,8 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
     try {
       await audio.play();
     } catch (error) {
-      if (playRequestIdRef.current !== requestId) {
-        return;
-      }
-
-      if (error instanceof DOMException && error.name === "AbortError") {
-        return;
-      }
-
+      if (playRequestIdRef.current !== requestId) return;
+      if (error instanceof DOMException && error.name === "AbortError") return;
       setIsPlaying(false);
       setError("Could not start playback.");
     }
@@ -198,50 +172,40 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
   }, [chunks, playChunk]);
 
   useEffect(() => {
-    if (!isPlaying || globalActiveIndex < 0) return;
-
-    const container = readingContainerRef.current;
-    const token = tokenRefs.current[globalActiveIndex];
-
-    if (!container || !token) return;
-
-    const maxScrollTop = container.scrollHeight - container.clientHeight;
-    if (maxScrollTop <= 0) {
-      return;
-    }
-
-    const targetCenterY = container.clientHeight * 0.3;
-    const tokenCenterY = token.offsetTop + token.offsetHeight / 2;
-    const nextScrollTop = Math.max(
-      0,
-      Math.min(maxScrollTop, tokenCenterY - targetCenterY),
-    );
-
-    if (Math.abs(container.scrollTop - nextScrollTop) < 10) {
-      return;
-    }
-
-    container.scrollTo({
-      top: nextScrollTop,
-      behavior: "auto",
-    });
-  }, [globalActiveIndex, isPlaying]);
-
-  useEffect(() => {
     return () => {
       invalidatePlayRequests();
-      stopTimeTracking();
       chunksRef.current.forEach((c) => URL.revokeObjectURL(c.audioUrl));
     };
   }, []);
 
+  // Update chunk durations when audio metadata loads
+  function handleLoadedMetadata() {
+    const audio = audioRef.current;
+    if (!audio || !Number.isFinite(audio.duration)) return;
+    const idx = currentChunkIndexRef.current;
+    setChunks((prev) => {
+      if (prev[idx] && prev[idx].duration === 0) {
+        const updated = [...prev];
+        updated[idx] = { ...updated[idx], duration: audio.duration };
+        chunksRef.current = updated;
+        return updated;
+      }
+      return prev;
+    });
+  }
+
+  function handleTimeUpdate() {
+    const audio = audioRef.current;
+    if (!audio) return;
+    setChunkCurrentTime(audio.currentTime);
+  }
+
   function handleChunkEnded() {
     invalidatePlayRequests();
-    stopTimeTracking();
     const nextIndex = currentChunkIndexRef.current + 1;
     setCurrentChunkIndex(nextIndex);
     currentChunkIndexRef.current = nextIndex;
-    setCurrentTime(0);
+    setChunkCurrentTime(0);
 
     if (chunksRef.current[nextIndex]) {
       playChunk(nextIndex);
@@ -249,10 +213,42 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
       waitingForNextChunk.current = true;
     } else {
       setIsPlaying(false);
-      setCurrentTime(0);
       setCurrentChunkIndex(0);
       currentChunkIndexRef.current = 0;
+      setChunkCurrentTime(0);
     }
+  }
+
+  function handleSeek(e: React.ChangeEvent<HTMLInputElement>) {
+    const seekTo = Number(e.target.value);
+    if (!chunks.length) return;
+
+    // Find which chunk this time falls in
+    let targetChunk = 0;
+    let timeInChunk = seekTo;
+    for (let i = 0; i < chunks.length; i++) {
+      if (timeInChunk < chunks[i].duration || i === chunks.length - 1) {
+        targetChunk = i;
+        break;
+      }
+      timeInChunk -= chunks[i].duration;
+    }
+
+    if (targetChunk !== currentChunkIndex) {
+      setCurrentChunkIndex(targetChunk);
+      currentChunkIndexRef.current = targetChunk;
+      const chunk = chunks[targetChunk];
+      if (audioRef.current && chunk) {
+        audioRef.current.src = chunk.audioUrl;
+        audioRef.current.playbackRate = playbackRate;
+        audioRef.current.currentTime = Math.max(0, Math.min(timeInChunk, chunk.duration - 0.01));
+        if (isPlaying) void safePlayAudio();
+      }
+    } else if (audioRef.current) {
+      audioRef.current.currentTime = Math.max(0, Math.min(timeInChunk, chunks[targetChunk].duration - 0.01));
+    }
+
+    setChunkCurrentTime(timeInChunk);
   }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -268,16 +264,15 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
     setError(null);
     setIsLoading(true);
     setIsStreaming(false);
-    setCurrentTime(0);
     setCurrentChunkIndex(0);
     currentChunkIndexRef.current = 0;
     setChunks([]);
     chunksRef.current = [];
     setTotalChunks(0);
     setActiveEntryId(null);
+    setChunkCurrentTime(0);
     waitingForNextChunk.current = false;
     invalidatePlayRequests();
-    stopTimeTracking();
 
     try {
       const response = await fetch("/api/read", {
@@ -316,6 +311,7 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
             audioUrl,
             audioBlob: blob,
             tokens: data.tokens ?? [],
+            duration: 0, // Will be set when audio loads
           };
           generatedChunks.push({
             audioBlob: blob,
@@ -382,10 +378,9 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
     audioRef.current?.pause();
     audioRef.current?.removeAttribute("src");
     audioRef.current?.load();
-    stopTimeTracking();
+
     chunksRef.current.forEach((c) => URL.revokeObjectURL(c.audioUrl));
     chunksRef.current = [];
-    tokenRefs.current = [];
     waitingForNextChunk.current = false;
 
     setText("");
@@ -394,7 +389,6 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
     setIsLoading(false);
     setIsStreaming(false);
     setIsPlaying(false);
-    setCurrentTime(0);
     setLastRenderedText("");
     setLastRenderedVoice(DEFAULT_VOICE);
     setChunks([]);
@@ -402,6 +396,7 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
     currentChunkIndexRef.current = 0;
     setTotalChunks(0);
     setActiveEntryId(null);
+    setChunkCurrentTime(0);
   }
 
   async function saveLibraryEntry(textToSave: string, voiceToSave: TtsVoice, savedChunks: SavedChunk[]) {
@@ -423,16 +418,11 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
 
   async function handleSave() {
     if (!hasAudio || isSaving) return;
-
     const savedId = await saveLibraryEntry(
       lastRenderedText,
       lastRenderedVoice,
-      chunks.map((c) => ({
-        audioBlob: c.audioBlob,
-        tokens: c.tokens,
-      })),
+      chunks.map((c) => ({ audioBlob: c.audioBlob, tokens: c.tokens })),
     );
-
     if (savedId) {
       setActiveEntryId(savedId);
       await fetchLibrary();
@@ -440,25 +430,20 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
   }
 
   async function handleLoadEntry(id: string) {
-    // Stop current playback
     invalidatePlayRequests();
     audioRef.current?.pause();
     chunksRef.current.forEach((c) => URL.revokeObjectURL(c.audioUrl));
 
     try {
       const entry = await getLibraryEntry(id);
+      if (!entry) throw new Error("Not found");
 
-      if (!entry) {
-        throw new Error("Not found");
-      }
-
-      const loadedChunks: AudioChunk[] = entry.chunks.map((c: SavedChunk) => {
-        return {
-          audioUrl: URL.createObjectURL(c.audioBlob),
-          audioBlob: c.audioBlob,
-          tokens: c.tokens,
-        };
-      });
+      const loadedChunks: AudioChunk[] = entry.chunks.map((c: SavedChunk) => ({
+        audioUrl: URL.createObjectURL(c.audioBlob),
+        audioBlob: c.audioBlob,
+        tokens: c.tokens,
+        duration: 0,
+      }));
 
       setText(entry.text);
       setSelectedVoice(entry.voice);
@@ -468,15 +453,13 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
       chunksRef.current = loadedChunks;
       setCurrentChunkIndex(0);
       currentChunkIndexRef.current = 0;
-      setCurrentTime(0);
       setTotalChunks(loadedChunks.length);
       setActiveEntryId(id);
       setError(null);
       setIsPlaying(false);
+      setChunkCurrentTime(0);
       setSidebarOpen(false);
-      stopTimeTracking();
 
-      // Prime the first chunk without auto-playing.
       if (audioRef.current && loadedChunks[0]) {
         audioRef.current.src = loadedChunks[0].audioUrl;
         audioRef.current.playbackRate = playbackRate;
@@ -500,14 +483,9 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
   async function handleSignOut() {
     setError(null);
     setIsSigningOut(true);
-
     try {
       const response = await fetch("/api/auth", { method: "DELETE" });
-
-      if (!response.ok) {
-        throw new Error("Could not sign out.");
-      }
-
+      if (!response.ok) throw new Error("Could not sign out.");
       router.refresh();
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "Could not sign out.");
@@ -516,15 +494,11 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
     }
   }
 
-  const displayTokens =
-    allTokens.length > 0
-      ? allTokens
-      : hasText
-        ? [{ value: text, isWord: false, start: null, end: null }]
-        : [];
+  // Show player mode when we have audio (not stale)
+  const showPlayer = hasAudio || isLoading;
 
   return (
-    <div className="flex min-h-screen lg:h-screen lg:overflow-hidden">
+    <div className="flex min-h-screen">
       {/* Sidebar */}
       <aside
         className={`fixed inset-y-0 left-0 z-30 flex w-72 flex-col border-r border-border bg-[#f5f0e8] transition-transform duration-200 ${
@@ -597,301 +571,306 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
       )}
 
       {/* Main content */}
-      <main className="mx-auto flex w-full max-w-2xl flex-1 flex-col px-5 py-8 sm:py-12 lg:h-screen lg:min-h-0 lg:overflow-hidden">
-        {/* Header */}
-        <header className="mb-8 flex items-center gap-3">
+      <main className="flex w-full flex-1 flex-col">
+        {/* Top bar */}
+        <header className="flex items-center gap-3 border-b border-border px-5 py-3 sm:px-8">
           <button
             onClick={() => setSidebarOpen(!sidebarOpen)}
-            className="flex h-8 w-8 items-center justify-center rounded-lg border border-border bg-white text-muted transition hover:text-foreground lg:hidden"
+            className="flex h-8 w-8 items-center justify-center rounded-lg text-muted transition hover:text-foreground lg:hidden"
           >
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-              <path d="M2 4h12M2 8h12M2 12h12" />
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <path d="M2 4.5h14M2 9h14M2 13.5h14" />
             </svg>
           </button>
-          <div>
-            <h1 className="font-serif text-3xl tracking-tight sm:text-4xl">
-              Reader
-            </h1>
-            <p className="mt-1 text-sm text-muted">
-              Paste text, pick a voice, listen along.
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={handleNew}
-            className="ml-auto flex h-9 items-center rounded-lg border border-border bg-white px-3 text-sm font-medium text-foreground transition hover:bg-foreground/5"
-          >
-            New
-          </button>
-          {passwordProtected && (
-            <button
-              className="flex h-9 items-center rounded-lg border border-border bg-white px-3 text-sm font-medium text-foreground transition hover:bg-foreground/5 disabled:cursor-not-allowed disabled:opacity-40"
-              disabled={isSigningOut}
-              onClick={handleSignOut}
-              type="button"
-            >
-              {isSigningOut ? "Signing out..." : "Lock"}
-            </button>
-          )}
-          {library.length > 0 && (
-            <button
-              onClick={() => setSidebarOpen(!sidebarOpen)}
-              className="hidden items-center gap-1.5 text-xs text-muted underline decoration-dotted underline-offset-2 transition hover:text-foreground lg:flex"
-            >
-              {library.length} saved
-            </button>
-          )}
-        </header>
 
-        {/* Input form */}
-        <form onSubmit={handleSubmit} className="shrink-0 flex flex-col gap-4">
-          <div
-            className={[
-              "overflow-hidden transition-[max-height,opacity,margin] duration-200 ease-out",
-              inputCollapsed ? "pointer-events-none -mb-2 max-h-0 opacity-0" : "max-h-[320px] opacity-100",
-            ].join(" ")}
-          >
-            <textarea
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              placeholder={PLACEHOLDER}
-              className="min-h-[160px] w-full resize-y rounded-xl border border-border bg-white px-4 py-3 font-serif text-[1.05rem] leading-7 text-foreground outline-none transition placeholder:font-sans focus:border-accent focus:ring-2 focus:ring-accent/20"
-            />
-          </div>
+          <h1 className="font-serif text-xl tracking-tight">Reader</h1>
 
-          {inputCollapsed && (
-            <div className="rounded-lg border border-border bg-white/70 px-4 py-2.5 text-xs text-muted">
-              Input hidden during playback to keep the reading view clear. Pause to edit.
-            </div>
-          )}
-
-          {/* Controls row */}
-          <div className="flex flex-wrap items-center gap-3">
-            <select
-              value={selectedVoice}
-              onChange={(e) => setSelectedVoice(e.target.value as TtsVoice)}
-              className="h-10 rounded-lg border border-border bg-white px-3 text-sm text-foreground outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/20"
-            >
-              {TTS_VOICES.map((v) => (
-                <option key={v.id} value={v.id}>
-                  {v.name} — {v.tone}
-                </option>
-              ))}
-            </select>
-
-            {hasAudio && !audioIsStale ? (
+          <div className="ml-auto flex items-center gap-2">
+            {library.length > 0 && (
               <button
-                type="button"
-                onClick={togglePlayback}
-                className="flex h-10 items-center gap-1.5 rounded-lg bg-foreground px-5 text-sm font-medium text-white transition hover:bg-foreground/85"
+                onClick={() => setSidebarOpen(!sidebarOpen)}
+                className="hidden items-center gap-1.5 text-xs text-muted underline decoration-dotted underline-offset-2 transition hover:text-foreground lg:flex"
               >
-                {isPlaying ? (
-                  <>
-                    <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
-                      <rect x="2" y="1" width="4" height="12" rx="1" />
-                      <rect x="8" y="1" width="4" height="12" rx="1" />
-                    </svg>
-                    Pause
-                  </>
-                ) : (
-                  <>
-                    <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
-                      <path d="M3 1.5v11l9-5.5z" />
-                    </svg>
-                    Play
-                  </>
-                )}
-              </button>
-            ) : (
-              <button
-                type="submit"
-                disabled={isLoading || !hasText}
-                className="h-10 rounded-lg bg-foreground px-5 text-sm font-medium text-white transition hover:bg-foreground/85 disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                {isLoading ? "Generating..." : "Generate"}
+                {library.length} saved
               </button>
             )}
-
             {hasAudio && (
-              <select
-                value={playbackRate}
-                onChange={(e) => setPlaybackRate(Number(e.target.value))}
-                className="h-10 rounded-lg border border-border bg-white px-2 text-sm text-foreground outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/20"
-              >
-                {[0.5, 0.75, 1, 1.25, 1.5, 1.75, 2].map((r) => (
-                  <option key={r} value={r}>
-                    {r}x
-                  </option>
-                ))}
-              </select>
-            )}
-
-            {canSave && (
               <button
                 type="button"
-                onClick={handleSave}
-                disabled={isSaving}
-                className="flex h-10 items-center gap-1.5 rounded-lg border border-border bg-white px-4 text-sm font-medium text-foreground transition hover:bg-foreground/5 disabled:opacity-40"
+                onClick={handleNew}
+                className="flex h-8 items-center rounded-lg border border-border bg-white px-3 text-xs font-medium text-foreground transition hover:bg-foreground/5"
               >
-                {isSaving ? "Saving..." : "Save"}
+                New
               </button>
             )}
-
-            {isAutoSaving && (
-              <span className="text-xs text-muted">Auto-saving...</span>
+            {passwordProtected && (
+              <button
+                className="flex h-8 items-center rounded-lg border border-border bg-white px-3 text-xs font-medium text-foreground transition hover:bg-foreground/5 disabled:cursor-not-allowed disabled:opacity-40"
+                disabled={isSigningOut}
+                onClick={handleSignOut}
+                type="button"
+              >
+                {isSigningOut ? "..." : "Lock"}
+              </button>
             )}
-
-            {!isAutoSaving && activeEntryId && (
-              <span className="text-xs text-green-600">Saved</span>
-            )}
-
-            <span className="ml-auto text-xs text-muted">
-              {charCount.toLocaleString()} chars
-              {isStreaming && (
-                <span className="ml-2 text-accent">
-                  {chunks.length}/{totalChunks} chunks
-                </span>
-              )}
-            </span>
           </div>
-
-          {/* Cost toggle */}
-          {hasText && !inputCollapsed && (
-            <button
-              type="button"
-              onClick={() => setShowCost(!showCost)}
-              className="self-start text-xs text-muted underline decoration-dotted underline-offset-2 transition hover:text-foreground"
-            >
-              {showCost ? "hide cost estimate" : "cost estimate"}
-            </button>
-          )}
-
-          {showCost && hasText && !inputCollapsed && (
-            <div className="rounded-lg border border-border bg-white/60 px-4 py-3 text-xs text-muted">
-              <span className="font-medium text-foreground">
-                ~${costEstimate.totalCost.toFixed(4)}
-              </span>
-              {" "}(estimated){" — "}
-              TTS ${costEstimate.ttsAudioCost.toFixed(4)} + alignment $
-              {costEstimate.alignmentCost.toFixed(4)} + input $
-              {costEstimate.ttsInputCost.toFixed(4)}
-            </div>
-          )}
-
-          {error && (
-            <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-2.5 text-sm text-red-700">
-              {error}
-            </p>
-          )}
-        </form>
+        </header>
 
         {/* Hidden audio element */}
         <audio
           ref={audioRef}
           className="hidden"
-          onPlay={() => {
-            setIsPlaying(true);
-            startTimeTracking();
-          }}
-          onPause={() => {
-            setIsPlaying(false);
-            stopTimeTracking();
-          }}
+          onPlay={() => setIsPlaying(true)}
+          onPause={() => setIsPlaying(false)}
           onEnded={handleChunkEnded}
-          onSeeking={(e) => setCurrentTime(e.currentTarget.currentTime)}
-          onSeeked={(e) => setCurrentTime(e.currentTarget.currentTime)}
-          onRateChange={() => {
-            if (audioRef.current && !audioRef.current.paused) {
-              startTimeTracking();
-            }
-          }}
+          onTimeUpdate={handleTimeUpdate}
+          onLoadedMetadata={handleLoadedMetadata}
         />
 
-        {/* Reading area */}
-        {displayTokens.length > 0 && (
-          <div className="mt-8 flex min-h-0 flex-1 flex-col">
-            <div className="mb-3 flex items-center gap-2">
-              <div
-                className={`h-1.5 w-1.5 rounded-full ${
-                  isPlaying
-                    ? "bg-green-500 animate-pulse"
-                    : isLoading
-                      ? "bg-yellow-500 animate-pulse"
-                      : hasAudio
-                        ? "bg-accent"
-                        : "bg-border"
-                }`}
-              />
-              <span className="text-xs text-muted">
-                {isLoading
-                  ? "Generating first chunk..."
-                  : isPlaying && isStreaming
-                    ? "Playing (loading more...)"
-                    : isAutoSaving
-                      ? "Saving article..."
-                    : isPlaying
-                      ? "Playing"
-                      : hasAudio
-                        ? "Paused"
-                        : "Paste text and press Read"}
-              </span>
+        {showPlayer ? (
+          /* ── Player Mode ── */
+          <div className="flex flex-1 flex-col" style={{ paddingBottom: "5.5rem" }}>
+            {/* Scrollable text */}
+            <div className="reading-scroll flex-1 overflow-y-auto px-5 py-8 sm:px-12 sm:py-12 lg:px-20">
+              <div className="mx-auto max-w-2xl">
+                {title && (
+                  <h2 className="mb-6 font-serif text-2xl font-medium leading-snug tracking-tight text-foreground sm:text-3xl">
+                    {title}
+                  </h2>
+                )}
+                <div className="font-serif text-lg leading-[1.9] tracking-[0.005em] text-foreground/80 whitespace-pre-wrap sm:text-xl sm:leading-[2]">
+                  {lastRenderedText || text}
+                </div>
+              </div>
             </div>
 
-            <div className="relative h-[min(60vh,38rem)] min-h-0 overflow-hidden rounded-2xl border border-border bg-white lg:h-full">
-              <div className="pointer-events-none absolute inset-x-4 top-[30%] h-18 -translate-y-1/2 rounded-[1.25rem] border border-accent/8 bg-accent/6" />
-              <div
-                ref={readingContainerRef}
-                className="reading-scroll h-full overflow-y-auto px-6 sm:px-10"
-              >
+            {/* ── Bottom Player Bar ── */}
+            <div className="fixed inset-x-0 bottom-0 z-10 border-t border-border bg-[#faf6f0]/95 backdrop-blur-sm">
+              {/* Progress bar */}
+              <div className="relative h-1 w-full bg-border">
                 <div
-                  aria-live="polite"
-                  className="min-h-full py-24 font-serif text-xl leading-[2] tracking-[0.005em] text-foreground sm:py-28 sm:text-2xl sm:leading-[2.1]"
-                >
-                {displayTokens.map((token, index) => {
-                  const isActive = index === globalActiveIndex;
-                  const isInPreviousChunk = index < currentChunkTokenOffset;
-                  const isSpoken =
-                    isInPreviousChunk ||
-                    (token.end !== null &&
-                      globalActiveIndex >= 0 &&
-                      index < globalActiveIndex);
+                  className="absolute inset-y-0 left-0 bg-foreground/70 transition-[width] duration-200"
+                  style={{
+                    width: totalDuration > 0 ? `${(overallTime / totalDuration) * 100}%` : "0%",
+                  }}
+                />
+                <input
+                  ref={progressRef}
+                  type="range"
+                  min={0}
+                  max={totalDuration || 1}
+                  step={0.1}
+                  value={overallTime}
+                  onChange={handleSeek}
+                  className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+                  disabled={!hasAudio || totalDuration === 0}
+                />
+              </div>
 
-                  return (
-                    <span
-                      key={`${index}-${token.value}`}
-                      ref={(el) => {
-                        tokenRefs.current[index] = el;
-                      }}
-                      className={[
-                        "whitespace-pre-wrap transition-[background-color,color,box-shadow] duration-75 ease-out",
-                        isActive
-                          ? "rounded-lg bg-[#ffd76b] px-1.5 py-1 text-[#1b1400] shadow-[0_8px_24px_rgba(255,215,107,0.5)]"
-                          : "",
-                        isSpoken && !isActive ? "text-[rgba(0,0,0,0.3)]" : "",
-                      ]
-                        .filter(Boolean)
-                        .join(" ")}
+              <div className="flex items-center gap-4 px-5 py-3 sm:px-8">
+                {/* Left: time */}
+                <span className="w-20 text-xs tabular-nums text-muted">
+                  {formatTime(overallTime)} / {formatTime(totalDuration)}
+                </span>
+
+                {/* Center: controls */}
+                <div className="flex flex-1 items-center justify-center gap-3">
+                  {/* Rewind 15s */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (audioRef.current) {
+                        const newTime = Math.max(0, audioRef.current.currentTime - 15);
+                        audioRef.current.currentTime = newTime;
+                        setChunkCurrentTime(newTime);
+                      }
+                    }}
+                    disabled={!hasAudio}
+                    className="flex h-9 w-9 items-center justify-center rounded-full text-muted transition hover:text-foreground disabled:opacity-30"
+                    title="Rewind 15s"
+                  >
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M1 4v6h6" />
+                      <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+                    </svg>
+                  </button>
+
+                  {/* Play/Pause */}
+                  {isLoading ? (
+                    <div className="flex h-12 w-12 items-center justify-center rounded-full bg-foreground text-white">
+                      <svg className="animate-spin" width="20" height="20" viewBox="0 0 24 24" fill="none">
+                        <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" strokeDasharray="31.4 31.4" strokeLinecap="round" />
+                      </svg>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={togglePlayback}
+                      disabled={!hasAudio}
+                      className="flex h-12 w-12 items-center justify-center rounded-full bg-foreground text-white transition hover:bg-foreground/85 disabled:opacity-40"
                     >
-                      {token.value}
+                      {isPlaying ? (
+                        <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+                          <rect x="4" y="3" width="4.5" height="14" rx="1" />
+                          <rect x="11.5" y="3" width="4.5" height="14" rx="1" />
+                        </svg>
+                      ) : (
+                        <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+                          <path d="M5 3.5v13l11-6.5z" />
+                        </svg>
+                      )}
+                    </button>
+                  )}
+
+                  {/* Forward 15s */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (audioRef.current && chunks[currentChunkIndex]) {
+                        const newTime = Math.min(
+                          chunks[currentChunkIndex].duration,
+                          audioRef.current.currentTime + 15,
+                        );
+                        audioRef.current.currentTime = newTime;
+                        setChunkCurrentTime(newTime);
+                      }
+                    }}
+                    disabled={!hasAudio}
+                    className="flex h-9 w-9 items-center justify-center rounded-full text-muted transition hover:text-foreground disabled:opacity-30"
+                    title="Forward 15s"
+                  >
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M23 4v6h-6" />
+                      <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+                    </svg>
+                  </button>
+                </div>
+
+                {/* Right: speed + status */}
+                <div className="flex w-20 items-center justify-end gap-2">
+                  {isStreaming && (
+                    <span className="text-xs text-accent">
+                      {chunks.length}/{totalChunks}
                     </span>
-                  );
-                })}
+                  )}
+                  {isAutoSaving && (
+                    <span className="text-xs text-muted">Saving...</span>
+                  )}
+                  {!isAutoSaving && activeEntryId && !isStreaming && (
+                    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="#16a34a" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M2 7.5l3 3 7-7" />
+                    </svg>
+                  )}
+                  <select
+                    value={playbackRate}
+                    onChange={(e) => setPlaybackRate(Number(e.target.value))}
+                    className="h-7 rounded border border-border bg-transparent px-1 text-xs text-foreground outline-none"
+                  >
+                    {[0.5, 0.75, 1, 1.25, 1.5, 1.75, 2].map((r) => (
+                      <option key={r} value={r}>
+                        {r}x
+                      </option>
+                    ))}
+                  </select>
                 </div>
               </div>
             </div>
           </div>
+        ) : (
+          /* ── Input Mode ── */
+          <div className="mx-auto flex w-full max-w-2xl flex-1 flex-col justify-center px-5 py-12 sm:py-20">
+            <div className="mb-8 text-center">
+              <h2 className="font-serif text-3xl tracking-tight sm:text-4xl">
+                What would you like to listen to?
+              </h2>
+              <p className="mt-2 text-sm text-muted">
+                Paste text, pick a voice, and press Generate.
+              </p>
+            </div>
+
+            <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+              <textarea
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                placeholder={PLACEHOLDER}
+                className="min-h-[180px] w-full resize-y rounded-xl border border-border bg-white px-5 py-4 font-serif text-[1.05rem] leading-7 text-foreground outline-none transition placeholder:font-sans focus:border-accent focus:ring-2 focus:ring-accent/20"
+              />
+
+              <div className="flex flex-wrap items-center gap-3">
+                <select
+                  value={selectedVoice}
+                  onChange={(e) => setSelectedVoice(e.target.value as TtsVoice)}
+                  className="h-10 rounded-lg border border-border bg-white px-3 text-sm text-foreground outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/20"
+                >
+                  {TTS_VOICES.map((v) => (
+                    <option key={v.id} value={v.id}>
+                      {v.name} — {v.tone}
+                    </option>
+                  ))}
+                </select>
+
+                <button
+                  type="submit"
+                  disabled={isLoading || !hasText}
+                  className="flex h-10 items-center gap-2 rounded-lg bg-foreground px-5 text-sm font-medium text-white transition hover:bg-foreground/85 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {isLoading && (
+                    <svg className="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none">
+                      <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" strokeDasharray="31.4 31.4" strokeLinecap="round" />
+                    </svg>
+                  )}
+                  {isLoading ? "Generating..." : "Generate"}
+                </button>
+
+                <span className="ml-auto text-xs text-muted">
+                  {charCount.toLocaleString()} chars
+                </span>
+              </div>
+
+              {/* Cost toggle */}
+              {hasText && (
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setShowCost(!showCost)}
+                    className="text-xs text-muted underline decoration-dotted underline-offset-2 transition hover:text-foreground"
+                  >
+                    {showCost ? "hide estimate" : "~" + formatTime(costEstimate.durationSeconds) + " listen time"}
+                  </button>
+                  {showCost && (
+                    <span className="text-xs text-muted">
+                      ~${costEstimate.totalCost.toFixed(4)} cost
+                    </span>
+                  )}
+                </div>
+              )}
+
+              {error && (
+                <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-2.5 text-sm text-red-700">
+                  {error}
+                </p>
+              )}
+            </form>
+
+            {/* Empty state */}
+            {!hasText && (
+              <div className="mt-12 flex flex-col items-center text-center text-muted">
+                <svg width="48" height="48" viewBox="0 0 48 48" fill="none" className="mb-4 opacity-20">
+                  <circle cx="24" cy="24" r="20" stroke="currentColor" strokeWidth="2" />
+                  <path d="M20 16v16l12-8z" fill="currentColor" opacity="0.3" />
+                </svg>
+                <p className="text-sm">Your personal text-to-speech player</p>
+              </div>
+            )}
+          </div>
         )}
 
-        {/* Empty state */}
-        {displayTokens.length === 0 && (
-          <div className="mt-16 flex flex-1 flex-col items-center justify-center text-center text-muted">
-            <svg width="48" height="48" viewBox="0 0 48 48" fill="none" className="mb-4 opacity-30">
-              <rect x="8" y="6" width="32" height="36" rx="4" stroke="currentColor" strokeWidth="2" />
-              <line x1="14" y1="16" x2="34" y2="16" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-              <line x1="14" y1="22" x2="30" y2="22" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-              <line x1="14" y1="28" x2="26" y2="28" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-            </svg>
-            <p className="text-sm">Paste something above to get started</p>
+        {/* Error in player mode */}
+        {showPlayer && error && (
+          <div className="fixed top-16 left-1/2 z-20 -translate-x-1/2">
+            <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-2.5 text-sm text-red-700 shadow-lg">
+              {error}
+            </p>
           </div>
         )}
       </main>

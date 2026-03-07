@@ -67,6 +67,26 @@ audio::-webkit-media-controls-panel {
   border-radius: 4px;
 }
 
+/* Player progress scrubber */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--foreground);
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+input[type="range"]:hover::-webkit-slider-thumb {
+  opacity: 1;
+}
+
 /* Textarea */
 textarea::placeholder {
   color: var(--muted);
