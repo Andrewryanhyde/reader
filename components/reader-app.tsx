@@ -2,7 +2,7 @@
 
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { calculateReadingCost, estimateDurationSeconds } from "@/lib/costs";
+import { calculateReadingCost } from "@/lib/costs";
 import { findActiveTokenIndex, ReadingToken } from "@/lib/reader";
 import { DEFAULT_VOICE, TTS_VOICES, TtsVoice } from "@/lib/tts";
 import { LibraryListItem, SavedChunk } from "@/lib/library";
@@ -129,7 +129,8 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
       return;
     }
 
-    setCurrentTime(audio.currentTime);
+    const leadSeconds = Math.min(0.04 * playbackRateRef.current, 0.12);
+    setCurrentTime(audio.currentTime + leadSeconds);
 
     if (!audio.paused && !audio.ended) {
       rafRef.current = requestAnimationFrame(syncCurrentTime);
@@ -746,11 +747,6 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
 
             <span className="ml-auto text-xs text-muted">
               {charCount.toLocaleString()} chars
-              {hasText && (() => {
-                const secs = estimateDurationSeconds(text) / playbackRate;
-                const mins = Math.ceil(secs / 60);
-                return <span className="ml-1.5">&middot; ~{mins} min listen</span>;
-              })()}
               {isStreaming && (
                 <span className="ml-2 text-accent">
                   {chunks.length}/{totalChunks} chunks
