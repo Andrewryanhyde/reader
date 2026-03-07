@@ -15,6 +15,14 @@ const serif = Newsreader({
 export const metadata: Metadata = {
   title: "Reader",
   description: "Paste text, hear it in a smooth voice, and follow along word by word.",
+  robots: {
+    index: false,
+    follow: false,
+    googleBot: {
+      index: false,
+      follow: false,
+    },
+  },
 };
 
 export default function RootLayout({
