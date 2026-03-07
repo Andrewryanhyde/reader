@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { calculateReadingCost } from "@/lib/costs";
 import { findActiveTokenIndex, ReadingToken } from "@/lib/reader";
 import { DEFAULT_VOICE, TTS_VOICES, TtsVoice } from "@/lib/tts";
@@ -26,7 +27,12 @@ function base64ToBlob(base64: string, mimeType: string) {
   return new Blob([bytes], { type: mimeType });
 }
 
-export function ReaderApp() {
+type ReaderAppProps = {
+  passwordProtected?: boolean;
+};
+
+export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
+  const router = useRouter();
   const [text, setText] = useState("");
   const [selectedVoice, setSelectedVoice] = useState<TtsVoice>(DEFAULT_VOICE);
   const [isLoading, setIsLoading] = useState(false);
@@ -50,6 +56,7 @@ export function ReaderApp() {
   const [activeEntryId, setActiveEntryId] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [isAutoSaving, setIsAutoSaving] = useState(false);
+  const [isSigningOut, setIsSigningOut] = useState(false);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const readingContainerRef = useRef<HTMLDivElement | null>(null);
@@ -490,6 +497,25 @@ export function ReaderApp() {
     }
   }
 
+  async function handleSignOut() {
+    setError(null);
+    setIsSigningOut(true);
+
+    try {
+      const response = await fetch("/api/auth", { method: "DELETE" });
+
+      if (!response.ok) {
+        throw new Error("Could not sign out.");
+      }
+
+      router.refresh();
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "Could not sign out.");
+    } finally {
+      setIsSigningOut(false);
+    }
+  }
+
   const displayTokens =
     allTokens.length > 0
       ? allTokens
@@ -597,6 +623,16 @@ export function ReaderApp() {
           >
             New
           </button>
+          {passwordProtected && (
+            <button
+              className="flex h-9 items-center rounded-lg border border-border bg-white px-3 text-sm font-medium text-foreground transition hover:bg-foreground/5 disabled:cursor-not-allowed disabled:opacity-40"
+              disabled={isSigningOut}
+              onClick={handleSignOut}
+              type="button"
+            >
+              {isSigningOut ? "Signing out..." : "Lock"}
+            </button>
+          )}
           {library.length > 0 && (
             <button
               onClick={() => setSidebarOpen(!sidebarOpen)}

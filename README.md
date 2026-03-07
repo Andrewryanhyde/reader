@@ -17,11 +17,13 @@ Paste text into a simple Next.js app, generate OpenAI text-to-speech audio, and 
 pnpm install
 ```
 
-2. Add your API key:
+2. Add your API key and optional app password:
 
 ```bash
 cp .env.example .env.local
 ```
+
+Set `READER_PASSWORD` in `.env.local` if you want the app locked behind a shared password. When configured, the password is checked on the server and successful logins receive an `HttpOnly` session cookie.
 
 3. Start the app:
 

@@ -1,6 +1,8 @@
 import OpenAI from "openai";
 import { NextResponse } from "next/server";
+import { cookies } from "next/headers";
 import { alignWordsToText, SpokenWord } from "@/lib/reader";
+import { AUTH_COOKIE_NAME, isAuthenticatedCookieValue } from "@/lib/auth";
 import { DEFAULT_VOICE, isTtsVoice, PREVIEW_SAMPLE_TEXT, TtsVoice } from "@/lib/tts";
 
 const FIRST_CHUNK_LIMIT = 2200;
@@ -112,6 +114,15 @@ async function generateChunk(
 }
 
 export async function POST(request: Request) {
+  const cookieStore = await cookies();
+
+  if (!isAuthenticatedCookieValue(cookieStore.get(AUTH_COOKIE_NAME)?.value)) {
+    return NextResponse.json(
+      { error: "Enter the app password before generating audio." },
+      { status: 401 },
+    );
+  }
+
   const openai = getOpenAIClient();
 
   if (!openai) {
