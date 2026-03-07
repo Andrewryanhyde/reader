@@ -1,36 +1,47 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Reader
 
-## Getting Started
+Paste text into a simple Next.js app, generate OpenAI text-to-speech audio, and follow along with live word highlighting while it plays.
 
-First, run the development server:
+## Stack
+
+- Next.js App Router
+- Tailwind CSS v4
+- OpenAI Node SDK
+- `pnpm`
+
+## Setup
+
+1. Install dependencies:
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+pnpm install
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+2. Add your API key:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+cp .env.example .env.local
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+3. Start the app:
 
-## Learn More
+```bash
+pnpm dev
+```
 
-To learn more about Next.js, take a look at the following resources:
+4. Open [http://localhost:3000](http://localhost:3000)
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Features
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+- Pick from the built-in OpenAI TTS voices and preview each one before generating a full reading
+- Generate a spoken version of the pasted text with live word highlighting
+- Save your library locally in the current browser with IndexedDB, including generated audio chunks
+- See an estimated per-reading API cost, including both speech generation and the transcription pass used for word timing
 
-## Deploy on Vercel
+## Notes
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- The server uses `gpt-4o-mini-tts` with a calm voice prompt.
+- Word highlighting is produced by transcribing the generated audio with `whisper-1` word timestamps, then aligning those timestamps back onto the original pasted text.
+- The app currently enforces a 4,000-character input cap because the installed OpenAI SDK type for `v1/audio/speech` documents a 4,096-character max input, while the current `gpt-4o-mini-tts` model page separately says the model supports up to 2,000 input tokens.
+- Cost estimates are based on the current OpenAI pricing page: `gpt-4o-mini-tts` text input at `$0.60 / 1M tokens`, speech output estimated at `$0.015 / minute`, and `whisper-1` transcription at `$0.006 / minute`.
+- Saved articles now live in browser IndexedDB, so they persist across reloads on the same browser/device but do not sync across devices.
