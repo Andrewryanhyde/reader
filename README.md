@@ -27,7 +27,7 @@ This repository is an open-source app, not an npm package. `package.json` intent
 - pnpm `>=10`
 - An OpenAI API key with access to text-to-speech and transcription models
 
-The current repo is tested locally with Node `20.19.4` and pnpm `10.28.2`.
+CI runs against Node `20.19.4` and pnpm `10.28.2`.
 
 ## Environment Variables
 
@@ -67,16 +67,16 @@ Open [http://localhost:3000](http://localhost:3000).
 
 ## Privacy and Cost Notes
 
-- Pasted text is sent to OpenAI when you generate a preview or a full reading.
+- Pasted text is sent to OpenAI when you generate a full reading. Voice previews use a hardcoded sample and do not send your text.
 - Generated readings are stored in the current browser's IndexedDB. They do not sync across devices.
 - Running the app spends the API credits for the `OPENAI_API_KEY` configured on the server.
-- Cost estimates shown in the UI are only estimates. They are based on assumptions in [lib/costs.ts](/Users/andrewhyde/chat/reader/lib/costs.ts) and may drift from current vendor pricing.
+- Cost estimates shown in the UI are only estimates. They are based on assumptions in [lib/costs.ts](./lib/costs.ts) and may drift from current vendor pricing.
 
 ## Product Limitations
 
 - The optional password gate is suitable for light personal protection, not public multi-user hosting.
 - Word alignment currently assumes English transcription via `whisper-1`.
-- The app enforces a 4,000-character input cap in the UI and request flow.
+- Long text is split into chunks for TTS processing; very long inputs will make multiple API calls.
 - Saved readings are browser-local only.
 - Read mode depends on OpenAI successfully generating both speech and transcription timestamps.
 
