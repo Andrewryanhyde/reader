@@ -27,15 +27,20 @@ pnpm install
 cp .env.example .env.local
 ```
 
-Add your API key to `.env.local`, then:
+Edit `.env.local` with your values:
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `OPENAI_API_KEY` | Yes | Your OpenAI API key. Needs access to `gpt-4o-mini-tts` and `whisper-1`. |
+| `READER_PASSWORD` | No | Set this to put a shared password gate in front of the app. |
+
+Then start the dev server:
 
 ```bash
 pnpm dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000).
-
-Optionally set `READER_PASSWORD` in `.env.local` to put a shared password gate in front of the app.
 
 ## Stack
 
@@ -53,7 +58,7 @@ CI runs against Node `20.19.4` and pnpm `10.28.2`.
 ## Privacy and Cost
 
 - Your text is sent to OpenAI when you generate a reading.
-- Each reading costs roughly **$0.02 per minute** of audio (TTS generation + Whisper alignment). The library sidebar shows a cost estimate per reading.
+- Generating a reading costs roughly **$0.02 per minute** of audio (TTS + Whisper alignment). After that, playback is free — the audio and timestamps are saved locally. The library sidebar shows the estimated generation cost per reading.
 - Readings are stored in your browser only. They don't sync anywhere.
 - Cost estimates are based on assumptions in [lib/costs.ts](./lib/costs.ts) and may drift from current OpenAI pricing.
 
