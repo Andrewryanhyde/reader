@@ -2,20 +2,16 @@
 
 import { MutableRefObject, RefObject, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  buildSentences,
   findActiveTimedWordIndex,
+  findSentence,
   getEstimatedBlockHeight,
-  HydratedDisplayToken,
   HydratedReaderTrack,
 } from "@/lib/reader";
 
 const BLOCK_OVERSCAN = 2;
 const FOCUS_BAND_TOP = 0.5;
 const SCROLL_LERP = 0.13;
-
-type Sentence = {
-  wordStart: number;
-  wordEnd: number;
-};
 
 type FocusReaderProps = {
   audioRef: RefObject<HTMLAudioElement | null>;
@@ -26,48 +22,6 @@ type FocusReaderProps = {
   title: string;
   track: HydratedReaderTrack | null;
 };
-
-function buildSentences(tokens: HydratedDisplayToken[]): Sentence[] {
-  const sentences: Sentence[] = [];
-  let sentenceStart: number | null = null;
-  let lastWordIndex: number | null = null;
-
-  for (const token of tokens) {
-    if (token.globalWordIndex !== null) {
-      if (sentenceStart === null) {
-        sentenceStart = token.globalWordIndex;
-      }
-      lastWordIndex = token.globalWordIndex;
-    }
-
-    if (
-      token.kind === "word" &&
-      /[.!?]["'\u201D\u2019)]*$/.test(token.value) &&
-      sentenceStart !== null &&
-      lastWordIndex !== null
-    ) {
-      sentences.push({ wordStart: sentenceStart, wordEnd: lastWordIndex });
-      sentenceStart = null;
-      lastWordIndex = null;
-    }
-  }
-
-  if (sentenceStart !== null && lastWordIndex !== null) {
-    sentences.push({ wordStart: sentenceStart, wordEnd: lastWordIndex });
-  }
-
-  return sentences;
-}
-
-function findSentence(sentences: Sentence[], wordIndex: number): Sentence | null {
-  for (const sentence of sentences) {
-    if (wordIndex >= sentence.wordStart && wordIndex <= sentence.wordEnd) {
-      return sentence;
-    }
-    if (sentence.wordStart > wordIndex) break;
-  }
-  return null;
-}
 
 export function FocusReader({
   audioRef,

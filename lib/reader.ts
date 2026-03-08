@@ -88,6 +88,11 @@ export type HydratedReaderTrack = {
   totalDuration: number;
 };
 
+export type Sentence = {
+  wordStart: number;
+  wordEnd: number;
+};
+
 type SourceWord = {
   tokenIndex: number;
   wordIndex: number;
@@ -116,6 +121,7 @@ const TOKEN_PATTERN = /(\n{2,}|\s+|[^\s]+)/g;
 const DEFAULT_BLOCK_HEIGHT = 156;
 const BLOCK_TARGET_WORDS = 36;
 const BLOCK_MAX_WORDS = 80;
+const SENTENCE_END_PATTERN = /[.!?]["'\u201D\u2019)]*$/;
 
 export function normalizeWord(value: string) {
   return value
@@ -424,6 +430,60 @@ export function findActiveTimedWordIndex(timedWords: HydratedTimedWord[], articl
   return result;
 }
 
+export function buildSentences(tokens: HydratedDisplayToken[]): Sentence[] {
+  const sentences: Sentence[] = [];
+  let sentenceStart: number | null = null;
+  let lastWordIndex: number | null = null;
+
+  for (const token of tokens) {
+    if (token.globalWordIndex !== null) {
+      if (sentenceStart === null) {
+        sentenceStart = token.globalWordIndex;
+      }
+      lastWordIndex = token.globalWordIndex;
+    }
+
+    if (
+      token.kind === "word" &&
+      SENTENCE_END_PATTERN.test(token.value) &&
+      sentenceStart !== null &&
+      lastWordIndex !== null
+    ) {
+      sentences.push({ wordStart: sentenceStart, wordEnd: lastWordIndex });
+      sentenceStart = null;
+      lastWordIndex = null;
+    }
+  }
+
+  if (sentenceStart !== null && lastWordIndex !== null) {
+    sentences.push({ wordStart: sentenceStart, wordEnd: lastWordIndex });
+  }
+
+  return sentences;
+}
+
+export function findSentence(sentences: Sentence[], wordIndex: number): Sentence | null {
+  if (sentences.length === 0) return null;
+
+  let low = 0;
+  let high = sentences.length - 1;
+
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const sentence = sentences[mid];
+
+    if (wordIndex < sentence.wordStart) {
+      high = mid - 1;
+    } else if (wordIndex > sentence.wordEnd) {
+      low = mid + 1;
+    } else {
+      return sentence;
+    }
+  }
+
+  return null;
+}
+
 export function getEstimatedBlockHeight(block: ReaderBlock) {
   return estimateBlockHeight(block) || DEFAULT_BLOCK_HEIGHT;
 }
@@ -483,7 +543,7 @@ function buildBlocks(displayTokens: DisplayToken[]): ReaderBlock[] {
 
     const isLastToken = tokenIndex === displayTokens.length - 1;
     const hasHardBreak = token.kind === "space" && token.value.includes("\n\n");
-    const isSentenceEnd = token.kind === "word" && /[.!?]["'\u201D\u2019)]*$/.test(token.value);
+    const isSentenceEnd = token.kind === "word" && SENTENCE_END_PATTERN.test(token.value);
     const hasSoftBreak = isSentenceEnd && wordsInBlock >= BLOCK_TARGET_WORDS;
     const exceededMaxWords = isSentenceEnd && wordsInBlock >= BLOCK_MAX_WORDS;
 
