@@ -711,9 +711,31 @@ function fillGapAssignments(
       );
       const spokenWord = spokenWords[spokenGapStart + spokenOffset];
 
+      // Count how many source words map to this same spoken word so we can
+      // subdivide its time range and give each source word a unique window.
+      let shareCount = 0;
+      let shareIndex = 0;
+
+      for (let peer = 0; peer < sourceGapLength; peer += 1) {
+        const peerSpokenOffset = Math.min(
+          spokenGapLength - 1,
+          Math.floor(((peer + 0.5) * spokenGapLength) / sourceGapLength),
+        );
+
+        if (peerSpokenOffset === spokenOffset) {
+          if (peer === offset) {
+            shareIndex = shareCount;
+          }
+
+          shareCount += 1;
+        }
+      }
+
+      const sliceDuration = (spokenWord.end - spokenWord.start) / shareCount;
+
       assignments[sourceGapStart + offset] = {
-        start: spokenWord.start,
-        end: spokenWord.end,
+        start: spokenWord.start + shareIndex * sliceDuration,
+        end: spokenWord.start + (shareIndex + 1) * sliceDuration,
         interpolated: true,
         normalized: sourceWords[sourceGapStart + offset].normalized,
       };
@@ -740,22 +762,37 @@ function fillGapAssignments(
 function normalizeAssignments(assignments: TimingAssignment[]) {
   const normalized = assignments.map((assignment) => ({ ...assignment }));
 
+  if (normalized.length === 0) {
+    return normalized;
+  }
+
+  // Ensure start times are strictly increasing. When Whisper reports
+  // overlapping or identical starts for consecutive words, push later
+  // starts forward so the binary search can land on every word.
+  for (let index = 1; index < normalized.length; index += 1) {
+    if (normalized[index].start <= normalized[index - 1].start) {
+      normalized[index].start = normalized[index - 1].start + 0.001;
+    }
+  }
+
+  // Clamp each word's end so it sits between its own start and the next
+  // word's start, ensuring non-zero windows and no overlaps.
   for (let index = 0; index < normalized.length; index += 1) {
     const next = normalized[index + 1];
 
     if (!next) {
-      normalized[index].end = Math.max(normalized[index].start, normalized[index].end);
+      normalized[index].end = Math.max(normalized[index].start + 0.001, normalized[index].end);
       continue;
     }
 
-    normalized[index].end = Math.max(
-      normalized[index].start,
-      Math.min(next.start, normalized[index].end || next.start),
-    );
+    // Use the word's own end when it's a valid positive number, otherwise
+    // fall back to the next word's start.
+    const rawEnd = normalized[index].end > 0 ? normalized[index].end : next.start;
 
-    if (normalized[index].end < normalized[index].start) {
-      normalized[index].end = normalized[index].start;
-    }
+    normalized[index].end = Math.max(
+      normalized[index].start + 0.001,
+      Math.min(next.start, rawEnd),
+    );
   }
 
   return normalized;

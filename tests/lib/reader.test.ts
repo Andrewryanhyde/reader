@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildChunkTrack,
+  findActiveTimedWordIndex,
   hydrateChunkTracks,
   inflateSavedChunkTrack,
   tokenizeDisplayTokens,
@@ -69,5 +70,66 @@ describe("lib/reader", () => {
     });
     expect(hydrated.displayTokens[0].globalWordIndex).toBe(0);
     expect(hydrated.displayTokens.at(-1)?.globalBlockIndex).toBeGreaterThanOrEqual(1);
+  });
+
+  it("assigns unique time ranges when multiple source words map to one spoken word", () => {
+    // Whisper returns 1 spoken word for 3 source words
+    const track = buildChunkTrack(
+      "I am very happy today.",
+      [
+        { word: "I", start: 0, end: 0.2 },
+        { word: "happy", start: 0.8, end: 1.2 },
+        { word: "today", start: 1.3, end: 1.7 },
+      ],
+      0,
+    );
+
+    // "am" and "very" are not in the spoken words, so they sit in the gap
+    // between the "I" anchor and the "happy" anchor. They should get unique
+    // time windows so the binary search can land on each one individually.
+    const hydrated = hydrateChunkTracks([track]);
+    const starts = hydrated.timedWords.map((w) => w.articleStart);
+
+    // Every word should have a distinct start time
+    const uniqueStarts = new Set(starts);
+    expect(uniqueStarts.size).toBe(starts.length);
+
+    // Verify binary search can find each word individually
+    for (let i = 0; i < hydrated.timedWords.length; i++) {
+      const word = hydrated.timedWords[i];
+      const midTime = (word.articleStart + word.articleEnd) / 2;
+      const found = findActiveTimedWordIndex(hydrated.timedWords, midTime);
+      expect(found).toBe(i);
+    }
+  });
+
+  it("does not skip words when Whisper reports overlapping timestamps", () => {
+    // Whisper sometimes gives consecutive words the same or overlapping start times
+    const track = buildChunkTrack(
+      "She quickly ran away.",
+      [
+        { word: "She", start: 0, end: 0.3 },
+        { word: "quickly", start: 0.3, end: 0.3 },
+        { word: "ran", start: 0.3, end: 0.6 },
+        { word: "away", start: 0.7, end: 1.0 },
+      ],
+      0,
+    );
+
+    const hydrated = hydrateChunkTracks([track]);
+    const starts = hydrated.timedWords.map((w) => w.articleStart);
+
+    // Every word must have a strictly increasing start time
+    for (let i = 1; i < starts.length; i++) {
+      expect(starts[i]).toBeGreaterThan(starts[i - 1]);
+    }
+
+    // Binary search must be able to land on each word
+    for (let i = 0; i < hydrated.timedWords.length; i++) {
+      const word = hydrated.timedWords[i];
+      const midTime = (word.articleStart + word.articleEnd) / 2;
+      const found = findActiveTimedWordIndex(hydrated.timedWords, midTime);
+      expect(found).toBe(i);
+    }
   });
 });

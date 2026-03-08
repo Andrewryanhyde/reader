@@ -1,6 +1,6 @@
 "use client";
 
-import { MutableRefObject, RefObject, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { MutableRefObject, RefObject, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   buildSentences,
   findActiveTimedWordIndex,
@@ -10,6 +10,7 @@ import {
 } from "@/lib/reader";
 
 const BLOCK_OVERSCAN = 2;
+const BLOCK_OVERSCAN_PLAYING = 4;
 const FOCUS_BAND_TOP = 0.5;
 const SCROLL_LERP = 0.13;
 
@@ -36,13 +37,18 @@ export function FocusReader({
   const blockRefs = useRef(new Map<number, HTMLDivElement>());
   const wordRefs = useRef(new Map<number, HTMLSpanElement>());
   const rafRef = useRef<number | null>(null);
+  // committedWordIndexRef tracks the word index that React has actually
+  // painted. The animation loop only advances from this value, so no word
+  // is skipped between commits.
+  const committedWordIndexRef = useRef(-1);
   const [activeBlockIndex, setActiveBlockIndex] = useState(0);
   const [activeWordIndex, setActiveWordIndex] = useState(-1);
   const [measuredHeights, setMeasuredHeights] = useState<Record<number, number>>({});
 
   const blocks = useMemo(() => track?.blocks ?? [], [track]);
-  const visibleStart = Math.max(0, activeBlockIndex - BLOCK_OVERSCAN);
-  const visibleEnd = Math.min(blocks.length - 1, activeBlockIndex + BLOCK_OVERSCAN);
+  const overscan = isPlaying ? BLOCK_OVERSCAN_PLAYING : BLOCK_OVERSCAN;
+  const visibleStart = Math.max(0, activeBlockIndex - overscan);
+  const visibleEnd = Math.min(blocks.length - 1, activeBlockIndex + overscan);
 
   const visibleBlocks = useMemo(() => {
     if (!track || blocks.length === 0) return [];
@@ -119,6 +125,19 @@ export function FocusReader({
     }
   }, []);
 
+  // After React commits a new activeWordIndex, mark it as committed so the
+  // animation loop knows it can advance to the next word.
+  useLayoutEffect(() => {
+    committedWordIndexRef.current = activeWordIndex;
+  }, [activeWordIndex]);
+
+  // Scroll after commit so word refs are guaranteed to be mounted.
+  useLayoutEffect(() => {
+    if (activeWordIndex >= 0) {
+      scrollToWord(activeWordIndex, isPlaying);
+    }
+  }, [activeWordIndex, scrollToWord, isPlaying]);
+
   const syncToAudioClock = useCallback((smooth: boolean) => {
     if (!track || track.timedWords.length === 0) return;
 
@@ -127,36 +146,45 @@ export function FocusReader({
       (chunkStartTimes[currentChunkIndexRef.current] ?? 0) + (audio?.currentTime ?? 0);
     const fallbackIndex =
       articleTime <= track.timedWords[0].articleStart ? 0 : track.timedWords.length - 1;
-    const nextTimedWordIndex = findActiveTimedWordIndex(track.timedWords, articleTime);
-    const nextWord = track.timedWords[nextTimedWordIndex >= 0 ? nextTimedWordIndex : fallbackIndex];
-    const nextWordIndex = nextWord?.globalIndex ?? -1;
+    const targetTimedWordIndex = findActiveTimedWordIndex(track.timedWords, articleTime);
+    const targetWord = track.timedWords[targetTimedWordIndex >= 0 ? targetTimedWordIndex : fallbackIndex];
+    const targetWordIndex = targetWord?.globalIndex ?? -1;
+
+    if (targetWordIndex < 0) return;
+
+    // During playback (smooth), advance at most one word past what React has
+    // actually committed/painted. This guarantees every word is visible for
+    // at least one frame, even at block boundaries where React has extra work.
+    const committed = committedWordIndexRef.current;
+    let nextWordIndex: number;
+
+    if (smooth && committed >= 0 && targetWordIndex > committed + 1) {
+      nextWordIndex = committed + 1;
+    } else {
+      nextWordIndex = targetWordIndex;
+    }
+
+    const nextWord = track.timedWords[nextWordIndex] ?? targetWord;
     const nextBlockIndex = nextWord?.globalBlockIndex ?? 0;
 
-    if (nextWordIndex >= 0) {
-      scrollToWord(nextWordIndex, smooth);
-      setActiveWordIndex((current) => (current === nextWordIndex ? current : nextWordIndex));
-      setActiveBlockIndex((current) => (current === nextBlockIndex ? current : nextBlockIndex));
-    }
-  }, [audioRef, chunkStartTimes, currentChunkIndexRef, scrollToWord, track]);
+    setActiveWordIndex((prev) => (prev === nextWordIndex ? prev : nextWordIndex));
+    setActiveBlockIndex((prev) => (prev === nextBlockIndex ? prev : nextBlockIndex));
+  }, [audioRef, chunkStartTimes, currentChunkIndexRef, track]);
 
   // Initial sync when track loads
   useEffect(() => {
+    committedWordIndexRef.current = -1;
     const frame = requestAnimationFrame(() => syncToAudioClock(false));
     return () => cancelAnimationFrame(frame);
   }, [syncToAudioClock, track]);
 
   // Re-scroll when visible blocks change (virtualization re-renders)
-  // Double-raf ensures the DOM has settled after block mount
   useEffect(() => {
     if (activeWordIndex < 0) return;
     let cancelled = false;
     requestAnimationFrame(() => {
       if (cancelled) return;
       scrollToWord(activeWordIndex, false);
-      requestAnimationFrame(() => {
-        if (cancelled) return;
-        scrollToWord(activeWordIndex, false);
-      });
     });
     return () => { cancelled = true; };
   }, [activeWordIndex, scrollToWord, visibleBlocks]);
