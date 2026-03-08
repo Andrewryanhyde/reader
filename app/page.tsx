@@ -9,9 +9,18 @@ import {
 
 export const dynamic = "force-dynamic";
 
-export default async function Home() {
+type HomeProps = {
+  searchParams?: Promise<{ entry?: string | string[] }> | { entry?: string | string[] };
+};
+
+export default async function Home({ searchParams }: HomeProps) {
+  const resolvedSearchParams = await Promise.resolve(searchParams);
+  const initialEntryId = Array.isArray(resolvedSearchParams?.entry)
+    ? resolvedSearchParams?.entry[0] ?? null
+    : resolvedSearchParams?.entry ?? null;
+
   if (!isPasswordProtectionEnabled()) {
-    return <ReaderApp passwordProtected={false} />;
+    return <ReaderApp passwordProtected={false} initialEntryId={initialEntryId} />;
   }
 
   const cookieStore = await cookies();
@@ -23,5 +32,5 @@ export default async function Home() {
     return <PasswordGate />;
   }
 
-  return <ReaderApp passwordProtected />;
+  return <ReaderApp passwordProtected initialEntryId={initialEntryId} />;
 }

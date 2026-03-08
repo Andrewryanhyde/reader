@@ -9,6 +9,7 @@ type SaveEntryInput = {
   text: string;
   voice: TtsVoice;
   chunks: SavedChunk[];
+  durationSeconds?: number;
 };
 
 function ensureIndexedDb() {
@@ -62,6 +63,7 @@ export async function listEntries(): Promise<LibraryListItem[]> {
           voice: entry.voice,
           createdAt: entry.createdAt,
           charCount: entry.text.length,
+          durationSeconds: entry.durationSeconds,
         })),
       );
     };
@@ -98,6 +100,7 @@ export async function saveEntry(input: SaveEntryInput): Promise<LibraryEntry> {
     voice: input.voice,
     createdAt: new Date().toISOString(),
     chunks: input.chunks,
+    durationSeconds: input.durationSeconds,
   };
 
   return new Promise((resolve, reject) => {
@@ -110,6 +113,48 @@ export async function saveEntry(input: SaveEntryInput): Promise<LibraryEntry> {
     transaction.oncomplete = () => closeDatabase(database);
     transaction.onabort = () =>
       reject(transaction.error ?? new Error("Failed to save entry."));
+  });
+}
+
+export async function updateEntryDuration(id: string, durationSeconds: number): Promise<void> {
+  const database = await openDatabase();
+
+  return new Promise((resolve, reject) => {
+    const transaction = database.transaction(STORE_NAME, "readwrite");
+    const store = transaction.objectStore(STORE_NAME);
+    const getRequest = store.get(id);
+
+    getRequest.onsuccess = () => {
+      const entry = getRequest.result as LibraryEntry | undefined;
+      if (!entry) return resolve();
+      entry.durationSeconds = durationSeconds;
+      store.put(entry);
+    };
+
+    getRequest.onerror = () => reject(getRequest.error ?? new Error("Failed to update entry."));
+    transaction.oncomplete = () => { closeDatabase(database); resolve(); };
+    transaction.onabort = () => reject(transaction.error ?? new Error("Failed to update entry."));
+  });
+}
+
+export async function updateEntryProgress(id: string, progressSeconds: number): Promise<void> {
+  const database = await openDatabase();
+
+  return new Promise((resolve, reject) => {
+    const transaction = database.transaction(STORE_NAME, "readwrite");
+    const store = transaction.objectStore(STORE_NAME);
+    const getRequest = store.get(id);
+
+    getRequest.onsuccess = () => {
+      const entry = getRequest.result as LibraryEntry | undefined;
+      if (!entry) return resolve();
+      entry.progressSeconds = progressSeconds;
+      store.put(entry);
+    };
+
+    getRequest.onerror = () => reject(getRequest.error ?? new Error("Failed to update progress."));
+    transaction.oncomplete = () => { closeDatabase(database); resolve(); };
+    transaction.onabort = () => reject(transaction.error ?? new Error("Failed to update progress."));
   });
 }
 

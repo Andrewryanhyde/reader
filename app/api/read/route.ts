@@ -1,7 +1,7 @@
 import OpenAI from "openai";
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { alignWordsToText, SpokenWord } from "@/lib/reader";
+import { buildChunkTrack, SpokenWord } from "@/lib/reader";
 import { AUTH_COOKIE_NAME, isAuthenticatedCookieValue } from "@/lib/auth";
 import { DEFAULT_VOICE, isTtsVoice, PREVIEW_SAMPLE_TEXT, TtsVoice } from "@/lib/tts";
 
@@ -80,6 +80,7 @@ async function generateChunk(
   openai: OpenAI,
   text: string,
   voice: TtsVoice,
+  chunkIndex: number,
 ) {
   const speechResponse = await openai.audio.speech.create({
     model: "gpt-4o-mini-tts",
@@ -108,9 +109,9 @@ async function generateChunk(
       end: w.end,
     })) ?? [];
 
-  const tokens = alignWordsToText(text, words);
+  const track = buildChunkTrack(text, words, chunkIndex);
 
-  return { audio, tokens };
+  return { audio, track };
 }
 
 export async function POST(request: Request) {
@@ -181,7 +182,7 @@ export async function POST(request: Request) {
   const stream = new ReadableStream({
     async start(controller) {
       try {
-        const firstChunk = await generateChunk(openai, chunks[0], selectedVoice);
+        const firstChunk = await generateChunk(openai, chunks[0], selectedVoice, 0);
         controller.enqueue(
           encoder.encode(
             JSON.stringify({
@@ -189,7 +190,11 @@ export async function POST(request: Request) {
               totalChunks: chunks.length,
               audioBase64: firstChunk.audio.toString("base64"),
               mimeType: "audio/mpeg",
-              tokens: firstChunk.tokens,
+              displayTokens: firstChunk.track.displayTokens,
+              timedWords: firstChunk.track.timedWords,
+              blocks: firstChunk.track.blocks,
+              quality: firstChunk.track.quality,
+              durationSeconds: firstChunk.track.durationSeconds,
             }) + "\n",
           ),
         );
@@ -200,7 +205,7 @@ export async function POST(request: Request) {
             return;
           }
 
-          inFlight.set(index, generateChunk(openai, chunks[index], selectedVoice));
+          inFlight.set(index, generateChunk(openai, chunks[index], selectedVoice, index));
         };
 
         for (
@@ -226,7 +231,11 @@ export async function POST(request: Request) {
             totalChunks: chunks.length,
             audioBase64: generated.audio.toString("base64"),
             mimeType: "audio/mpeg",
-            tokens: generated.tokens,
+            displayTokens: generated.track.displayTokens,
+            timedWords: generated.track.timedWords,
+            blocks: generated.track.blocks,
+            quality: generated.track.quality,
+            durationSeconds: generated.track.durationSeconds,
           });
 
           controller.enqueue(encoder.encode(line + "\n"));

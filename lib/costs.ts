@@ -29,6 +29,14 @@ export function estimateDurationSeconds(text: string) {
   return (wordCount / WORDS_PER_MINUTE_ESTIMATE) * 60;
 }
 
+const AVERAGE_WORD_LENGTH = 5;
+
+export function estimateDurationFromCharCount(charCount: number) {
+  if (charCount <= 0) return 0;
+  const wordCount = charCount / AVERAGE_WORD_LENGTH;
+  return (wordCount / WORDS_PER_MINUTE_ESTIMATE) * 60;
+}
+
 export function calculateReadingCost(text: string, durationSeconds?: number | null): ReadingCostEstimate {
   const inputTokensEstimate = estimateInputTokens(text);
   const resolvedDurationSeconds =

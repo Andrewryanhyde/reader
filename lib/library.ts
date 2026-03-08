@@ -1,9 +1,14 @@
-import { ReadingToken } from "./reader";
+import { ChunkTrackQuality, DisplayToken, LegacyReadingToken, ReaderBlock, TimedWord } from "./reader";
 import { TtsVoice } from "./tts";
 
 export type SavedChunk = {
   audioBlob: Blob;
-  tokens: ReadingToken[];
+  displayTokens?: DisplayToken[];
+  timedWords?: TimedWord[];
+  blocks?: ReaderBlock[];
+  durationSeconds?: number;
+  quality?: ChunkTrackQuality;
+  tokens?: LegacyReadingToken[];
 };
 
 export type LibraryEntry = {
@@ -13,6 +18,8 @@ export type LibraryEntry = {
   voice: TtsVoice;
   createdAt: string;
   chunks: SavedChunk[];
+  durationSeconds?: number;
+  progressSeconds?: number;
 };
 
 export type LibraryListItem = {
@@ -21,6 +28,7 @@ export type LibraryListItem = {
   voice: TtsVoice;
   createdAt: string;
   charCount: number;
+  durationSeconds?: number;
 };
 
 export function deriveTitle(text: string): string {
