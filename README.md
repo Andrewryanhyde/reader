@@ -1,56 +1,33 @@
 # Reader
 
-Reader is a small Next.js app for turning pasted text into OpenAI-generated speech, then following along with word-level highlighting while the audio plays.
+Turn any text into a personal audiobook with word-by-word highlighting that keeps your eyes locked to what you're hearing.
 
-Copyright (c) 2026 Andrew Hyde. Released under the [MIT License](./LICENSE).
+I built this because I struggle to get through long articles. Having the words highlighted as they're spoken keeps me focused in a way that reading alone doesn't. If you have ADHD or just find your attention wandering mid-paragraph, this might help.
 
-## What It Does
+<!-- Add a screenshot or GIF here: ![Reader screenshot](screenshot.png) -->
 
-- Generates text-to-speech audio with OpenAI
-- Aligns spoken audio back to the original text for live highlighting
-- Lets you preview built-in voices before generating a full reading
-- Saves readings locally in the current browser with IndexedDB
+## How It Works
 
-This repository is an open-source app, not an npm package. `package.json` intentionally remains `"private": true`.
+1. You paste text and pick a voice
+2. The server sends the text to OpenAI's `gpt-4o-mini-tts` to generate speech
+3. The generated audio is transcribed back through `whisper-1` to get word-level timestamps
+4. An alignment algorithm (LCS-based) maps the timestamps back to your original text
+5. During playback, each word highlights in sync with the audio
 
-## Stack
+Readings are saved in your browser's IndexedDB so you can close the tab and pick up where you left off. Nothing is stored on a server.
 
-- Next.js 16 App Router
-- React 19
-- Tailwind CSS v4
-- OpenAI Node SDK
-- pnpm
+## Getting Started
 
-## Requirements
-
-- Node.js `>=20.9.0`
-- pnpm `>=10`
-- An OpenAI API key with access to text-to-speech and transcription models
-
-CI runs against Node `20.19.4` and pnpm `10.28.2`.
-
-## Environment Variables
-
-Copy the example file and create a local env file:
+You'll need Node.js `>=20.9.0`, pnpm `>=10`, and an [OpenAI API key](https://platform.openai.com/api-keys) with access to TTS and transcription models.
 
 ```bash
+git clone https://github.com/Andrewryanhyde/reader.git
+cd reader
+pnpm install
 cp .env.example .env.local
 ```
 
-Supported variables:
-
-- `OPENAI_API_KEY` (required): used by the server routes that call OpenAI
-- `READER_PASSWORD` (optional): enables a shared-password gate backed by an `HttpOnly` cookie
-
-## Local Development
-
-Install dependencies:
-
-```bash
-pnpm install
-```
-
-Start the app:
+Add your API key to `.env.local`, then:
 
 ```bash
 pnpm dev
@@ -58,40 +35,39 @@ pnpm dev
 
 Open [http://localhost:3000](http://localhost:3000).
 
+Optionally set `READER_PASSWORD` in `.env.local` to put a shared password gate in front of the app.
+
+## Stack
+
+Next.js 16 (App Router), React 19, Tailwind CSS v4, OpenAI Node SDK.
+
 ## Scripts
 
-- `pnpm dev`: run the local development server
-- `pnpm lint`: run ESLint
-- `pnpm test`: run the Vitest suite
-- `pnpm build`: build the production app
+- `pnpm dev` — local dev server
+- `pnpm lint` — ESLint
+- `pnpm test` — Vitest suite
+- `pnpm build` — production build
 
-## Privacy and Cost Notes
+CI runs against Node `20.19.4` and pnpm `10.28.2`.
 
-- Pasted text is sent to OpenAI when you generate a full reading. Voice previews use a hardcoded sample and do not send your text.
-- Generated readings are stored in the current browser's IndexedDB. They do not sync across devices.
-- Running the app spends the API credits for the `OPENAI_API_KEY` configured on the server.
-- Cost estimates shown in the UI are only estimates. They are based on assumptions in [lib/costs.ts](./lib/costs.ts) and may drift from current vendor pricing.
+## Privacy and Cost
 
-## Product Limitations
+- Your text is sent to OpenAI when you generate a reading.
+- Each reading costs roughly **$0.02 per minute** of audio (TTS generation + Whisper alignment). The library sidebar shows a cost estimate per reading.
+- Readings are stored in your browser only. They don't sync anywhere.
+- Cost estimates are based on assumptions in [lib/costs.ts](./lib/costs.ts) and may drift from current OpenAI pricing.
 
-- The optional password gate is suitable for light personal protection, not public multi-user hosting.
-- Word alignment currently assumes English transcription via `whisper-1`.
-- Long text is split into chunks for TTS processing; very long inputs will make multiple API calls.
-- Saved readings are browser-local only.
-- Read mode depends on OpenAI successfully generating both speech and transcription timestamps.
+## Limitations
 
-## Maintainer Notes
-
-Current server routes:
-
-- `POST /api/auth`: validate the optional shared password and set the session cookie
-- `DELETE /api/auth`: clear the session cookie
-- `POST /api/read`: generate preview audio or a full streamed reading
-
-If you plan to host a public demo, add rate limiting, stronger authentication, request-size controls, and clearer abuse monitoring before exposing the API to the internet.
-
-Before making the repository public, review git history for any previously committed secrets or private content, even if the current working tree is clean.
+- English only. The Whisper alignment step is hardcoded to `language: "en"`.
+- Long text is split into chunks, so very long inputs make multiple API calls.
+- The optional password gate is for personal use, not hardened multi-user auth.
+- Saved readings are browser-local. Clear your browser data and they're gone.
 
 ## Contributing
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for development expectations, pull request guidance, and the pre-publication checklist.
+PRs are welcome. Run `pnpm lint && pnpm test && pnpm build` before submitting.
+
+## License
+
+[MIT](./LICENSE)

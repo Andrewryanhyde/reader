@@ -4,7 +4,7 @@
 
 Please do not open a public issue for security vulnerabilities.
 
-Instead, contact the maintainer privately with:
+Instead, [report a vulnerability through GitHub](https://github.com/Andrewryanhyde/reader/security/advisories/new) with:
 
 - a clear description of the issue
 - steps to reproduce it
