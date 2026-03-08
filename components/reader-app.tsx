@@ -64,6 +64,13 @@ function formatTime(seconds: number) {
   return `${minutes}:${remainingSeconds.toString().padStart(2, "0")}`;
 }
 
+function formatCost(item: LibraryListItem) {
+  const duration = item.durationSeconds ?? estimateDurationFromCharCount(item.charCount);
+  const cost = calculateReadingCost("x".repeat(item.charCount), duration);
+  if (cost.totalCost < 0.005) return "<$0.01";
+  return `$${cost.totalCost.toFixed(2)}`;
+}
+
 type ReaderAppProps = {
   initialEntryId?: string | null;
   passwordProtected?: boolean;
@@ -770,7 +777,8 @@ export function ReaderApp({ initialEntryId = null, passwordProtected = false }: 
                     <p className="mt-1 text-xs text-muted">
                       {item.voice} &middot;{" "}
                       {new Date(item.createdAt).toLocaleDateString()} &middot;{" "}
-                      {formatTime(item.durationSeconds ?? estimateDurationFromCharCount(item.charCount))}
+                      {formatTime(item.durationSeconds ?? estimateDurationFromCharCount(item.charCount))} &middot;{" "}
+                      {formatCost(item)}
                     </p>
                   </button>
                   <button

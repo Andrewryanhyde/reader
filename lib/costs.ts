@@ -1,5 +1,8 @@
+// gpt-4o-mini-tts: $0.60 per 1M text input tokens
 const TTS_INPUT_COST_PER_MILLION_TOKENS = 0.6;
+// gpt-4o-mini-tts audio output: ~$0.015/min (proxy for $12/1M audio tokens)
 const TTS_AUDIO_COST_PER_MINUTE = 0.015;
+// whisper-1 transcription: $0.006/min
 const WHISPER_COST_PER_MINUTE = 0.006;
 const CHARACTERS_PER_TOKEN_ESTIMATE = 4;
 const WORDS_PER_MINUTE_ESTIMATE = 170;
