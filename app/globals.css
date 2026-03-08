@@ -67,6 +67,29 @@ audio::-webkit-media-controls-panel {
   border-radius: 4px;
 }
 
+.focus-word {
+  color: rgba(26, 26, 26, 0.88);
+  transition:
+    background-color 80ms ease-out,
+    color 80ms ease-out,
+    box-shadow 100ms ease-out;
+}
+
+.focus-word--spoken {
+  color: rgba(26, 26, 26, 0.62);
+}
+
+.focus-word--sentence {
+  background: rgba(255, 228, 120, 0.48);
+  color: rgba(26, 26, 26, 0.95);
+}
+
+.focus-word--active {
+  background: rgba(170, 185, 235, 0.65);
+  color: #1a1a1a;
+  box-shadow: 0 0 0 1.5px rgba(140, 158, 220, 0.35);
+}
+
 /* Player progress scrubber */
 input[type="range"] {
   -webkit-appearance: none;

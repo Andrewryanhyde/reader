@@ -2,8 +2,9 @@
 
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { calculateReadingCost } from "@/lib/costs";
-import { ReadingToken } from "@/lib/reader";
+import { calculateReadingCost, estimateDurationFromCharCount } from "@/lib/costs";
+import { FocusReader } from "@/components/focus-reader";
+import { ChunkTrack, hydrateChunkTracks, inflateSavedChunkTrack } from "@/lib/reader";
 import { DEFAULT_VOICE, TTS_VOICES, TtsVoice } from "@/lib/tts";
 import { LibraryListItem, SavedChunk, deriveTitle } from "@/lib/library";
 import {
@@ -11,34 +12,64 @@ import {
   getEntry as getLibraryEntry,
   listEntries as listLibraryEntries,
   saveEntry as saveLibraryStoreEntry,
+  updateEntryDuration,
+  updateEntryProgress,
 } from "@/lib/library-store";
 
 const PLACEHOLDER = "Paste an article, meeting notes, or anything you want read aloud...";
 
 type AudioChunk = {
-  audioUrl: string;
   audioBlob: Blob;
-  tokens: ReadingToken[];
+  audioUrl: string;
   duration: number;
+  track: ChunkTrack;
+};
+
+type ReaderResponseChunk = {
+  audioBase64: string;
+  blocks?: ChunkTrack["blocks"];
+  chunkIndex: number;
+  displayTokens?: ChunkTrack["displayTokens"];
+  durationSeconds?: number;
+  error?: string;
+  mimeType: string;
+  quality?: ChunkTrack["quality"];
+  timedWords?: ChunkTrack["timedWords"];
+  totalChunks: number;
 };
 
 function base64ToBlob(base64: string, mimeType: string) {
   const binary = atob(base64);
-  const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
+  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
   return new Blob([bytes], { type: mimeType });
 }
 
+function probeDuration(url: string): Promise<number> {
+  return new Promise((resolve) => {
+    const audio = new Audio();
+    audio.preload = "metadata";
+    audio.onloadedmetadata = () => {
+      resolve(Number.isFinite(audio.duration) ? audio.duration : 0);
+      audio.src = "";
+    };
+    audio.onerror = () => resolve(0);
+    audio.src = url;
+  });
+}
+
 function formatTime(seconds: number) {
-  const m = Math.floor(seconds / 60);
-  const s = Math.floor(seconds % 60);
-  return `${m}:${s.toString().padStart(2, "0")}`;
+  const safeSeconds = Number.isFinite(seconds) ? Math.max(0, seconds) : 0;
+  const minutes = Math.floor(safeSeconds / 60);
+  const remainingSeconds = Math.floor(safeSeconds % 60);
+  return `${minutes}:${remainingSeconds.toString().padStart(2, "0")}`;
 }
 
 type ReaderAppProps = {
+  initialEntryId?: string | null;
   passwordProtected?: boolean;
 };
 
-export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
+export function ReaderApp({ initialEntryId = null, passwordProtected = false }: ReaderAppProps) {
   const router = useRouter();
   const [text, setText] = useState("");
   const [selectedVoice, setSelectedVoice] = useState<TtsVoice>(DEFAULT_VOICE);
@@ -48,71 +79,49 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
   const [error, setError] = useState<string | null>(null);
   const [lastRenderedText, setLastRenderedText] = useState("");
   const [lastRenderedVoice, setLastRenderedVoice] = useState<TtsVoice>(DEFAULT_VOICE);
-  const [showCost, setShowCost] = useState(false);
   const [playbackRate, setPlaybackRate] = useState(1.25);
 
-  // Chunk-based audio state
   const [chunks, setChunks] = useState<AudioChunk[]>([]);
   const [currentChunkIndex, setCurrentChunkIndex] = useState(0);
   const [totalChunks, setTotalChunks] = useState(0);
-
-  // Progress tracking
-  const [currentTime, setCurrentTime] = useState(0);
   const [chunkCurrentTime, setChunkCurrentTime] = useState(0);
 
-  // Library state
   const [library, setLibrary] = useState<LibraryListItem[]>([]);
+  const [isLibraryLoading, setIsLibraryLoading] = useState(true);
+  const [isRestoringEntry, setIsRestoringEntry] = useState(Boolean(initialEntryId));
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [activeEntryId, setActiveEntryId] = useState<string | null>(null);
-  const [isSaving, setIsSaving] = useState(false);
   const [isAutoSaving, setIsAutoSaving] = useState(false);
   const [isSigningOut, setIsSigningOut] = useState(false);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const progressRef = useRef<HTMLInputElement | null>(null);
   const chunksRef = useRef<AudioChunk[]>([]);
   const currentChunkIndexRef = useRef(0);
-  const waitingForNextChunk = useRef(false);
+  const waitingForNextChunkRef = useRef(false);
   const playRequestIdRef = useRef(0);
-  const progressRef = useRef<HTMLInputElement | null>(null);
+  const lastSavedProgressRef = useRef(0);
+  const initialEntryIdRef = useRef(initialEntryId);
 
-  // Keep refs in sync
-  useEffect(() => { chunksRef.current = chunks; }, [chunks]);
-  useEffect(() => { currentChunkIndexRef.current = currentChunkIndex; }, [currentChunkIndex]);
-
-  // Load library on mount
   useEffect(() => {
-    void fetchLibrary();
-  }, []);
+    chunksRef.current = chunks;
+  }, [chunks]);
 
-  async function fetchLibrary() {
+  useEffect(() => {
+    currentChunkIndexRef.current = currentChunkIndex;
+  }, [currentChunkIndex]);
+
+  const fetchLibrary = useCallback(async () => {
+    setIsLibraryLoading(true);
+
     try {
       setLibrary(await listLibraryEntries());
     } catch {
       setError("Could not open browser storage.");
+    } finally {
+      setIsLibraryLoading(false);
     }
-  }
-
-  // Compute durations
-  const chunkDurations = useMemo(() => chunks.map((c) => c.duration), [chunks]);
-  const totalDuration = useMemo(() => chunkDurations.reduce((a, b) => a + b, 0), [chunkDurations]);
-  const chunkStartTimes = useMemo(() => {
-    const starts: number[] = [];
-    let acc = 0;
-    for (const d of chunkDurations) {
-      starts.push(acc);
-      acc += d;
-    }
-    return starts;
-  }, [chunkDurations]);
-
-  // Overall progress
-  const overallTime = useMemo(() => {
-    if (chunks.length === 0) return 0;
-    return (chunkStartTimes[currentChunkIndex] ?? 0) + chunkCurrentTime;
-  }, [chunks, currentChunkIndex, chunkCurrentTime, chunkStartTimes]);
-
-  // Build flat token array from all received chunks
-  const allTokens = useMemo(() => chunks.flatMap((c) => c.tokens), [chunks]);
+  }, []);
 
   const normalizedInputText = text.trim();
   const charCount = text.length;
@@ -122,17 +131,93 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
   const hasAudio = chunks.length > 0 && !audioIsStale;
   const hasText = normalizedInputText.length > 0;
   const costEstimate = useMemo(() => calculateReadingCost(text, null), [text]);
-  const canSave = hasAudio && !isStreaming && !isAutoSaving && !activeEntryId;
 
   const title = useMemo(() => {
-    if (lastRenderedText) return deriveTitle(lastRenderedText);
-    if (hasText) return deriveTitle(text);
+    if (lastRenderedText) {
+      return deriveTitle(lastRenderedText);
+    }
+
+    if (hasText) {
+      return deriveTitle(text);
+    }
+
     return "";
-  }, [lastRenderedText, hasText, text]);
+  }, [hasText, lastRenderedText, text]);
+
+  const chunkDurations = useMemo(() => chunks.map((chunk) => chunk.duration), [chunks]);
+  const totalDuration = useMemo(() => chunkDurations.reduce((sum, duration) => sum + duration, 0), [chunkDurations]);
+  const chunkStartTimes = useMemo(() => {
+    const starts: number[] = [];
+    let total = 0;
+
+    for (const duration of chunkDurations) {
+      starts.push(total);
+      total += duration;
+    }
+
+    return starts;
+  }, [chunkDurations]);
+
+  const overallTime = useMemo(() => {
+    if (chunks.length === 0) {
+      return 0;
+    }
+
+    return (chunkStartTimes[currentChunkIndex] ?? 0) + chunkCurrentTime;
+  }, [chunkCurrentTime, chunkStartTimes, chunks.length, currentChunkIndex]);
+
+  const hydratedTrack = useMemo(() => {
+    if (chunks.length === 0) {
+      return null;
+    }
+
+    return hydrateChunkTracks(
+      chunks.map((chunk) => ({
+        ...chunk.track,
+        durationSeconds: chunk.duration || chunk.track.durationSeconds,
+      })),
+    );
+  }, [chunks]);
 
   useEffect(() => {
-    if (audioRef.current) audioRef.current.playbackRate = playbackRate;
+    if (!activeEntryId || overallTime === 0) {
+      return;
+    }
+
+    if (Math.abs(overallTime - lastSavedProgressRef.current) < 5) {
+      return;
+    }
+
+    lastSavedProgressRef.current = overallTime;
+    void updateEntryProgress(activeEntryId, overallTime).catch(() => {});
+  }, [activeEntryId, overallTime]);
+
+  useEffect(() => {
+    if (audioRef.current) {
+      audioRef.current.playbackRate = playbackRate;
+    }
   }, [playbackRate]);
+
+  useEffect(() => {
+    if (!activeEntryId && initialEntryIdRef.current) {
+      return;
+    }
+
+    const url = new URL(window.location.href);
+
+    if (activeEntryId) {
+      url.searchParams.set("entry", activeEntryId);
+    } else {
+      url.searchParams.delete("entry");
+    }
+
+    const nextUrl = `${url.pathname}${url.search}${url.hash}`;
+    const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+
+    if (nextUrl !== currentUrl) {
+      window.history.replaceState(null, "", nextUrl);
+    }
+  }, [activeEntryId]);
 
   function invalidatePlayRequests() {
     playRequestIdRef.current += 1;
@@ -140,16 +225,25 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
 
   async function safePlayAudio() {
     const audio = audioRef.current;
-    if (!audio) return;
+
+    if (!audio) {
+      return;
+    }
 
     const requestId = playRequestIdRef.current + 1;
     playRequestIdRef.current = requestId;
 
     try {
       await audio.play();
-    } catch (error) {
-      if (playRequestIdRef.current !== requestId) return;
-      if (error instanceof DOMException && error.name === "AbortError") return;
+    } catch (caughtError) {
+      if (playRequestIdRef.current !== requestId) {
+        return;
+      }
+
+      if (caughtError instanceof DOMException && caughtError.name === "AbortError") {
+        return;
+      }
+
       setIsPlaying(false);
       setError("Could not start playback.");
     }
@@ -157,16 +251,21 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
 
   const playChunk = useCallback((index: number) => {
     const chunk = chunksRef.current[index];
-    if (!chunk || !audioRef.current) return;
-    audioRef.current.src = chunk.audioUrl;
-    audioRef.current.playbackRate = playbackRate;
-    audioRef.current.currentTime = 0;
+    const audio = audioRef.current;
+
+    if (!chunk || !audio) {
+      return;
+    }
+
+    audio.src = chunk.audioUrl;
+    audio.playbackRate = playbackRate;
+    audio.currentTime = 0;
     void safePlayAudio();
   }, [playbackRate]);
 
   useEffect(() => {
-    if (waitingForNextChunk.current && chunks[currentChunkIndexRef.current]) {
-      waitingForNextChunk.current = false;
+    if (waitingForNextChunkRef.current && chunks[currentChunkIndexRef.current]) {
+      waitingForNextChunkRef.current = false;
       playChunk(currentChunkIndexRef.current);
     }
   }, [chunks, playChunk]);
@@ -174,92 +273,125 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
   useEffect(() => {
     return () => {
       invalidatePlayRequests();
-      chunksRef.current.forEach((c) => URL.revokeObjectURL(c.audioUrl));
+      chunksRef.current.forEach((chunk) => URL.revokeObjectURL(chunk.audioUrl));
     };
   }, []);
 
-  // Update chunk durations when audio metadata loads
   function handleLoadedMetadata() {
     const audio = audioRef.current;
-    if (!audio || !Number.isFinite(audio.duration)) return;
-    const idx = currentChunkIndexRef.current;
-    setChunks((prev) => {
-      if (prev[idx] && prev[idx].duration === 0) {
-        const updated = [...prev];
-        updated[idx] = { ...updated[idx], duration: audio.duration };
-        chunksRef.current = updated;
-        return updated;
+
+    if (!audio || !Number.isFinite(audio.duration)) {
+      return;
+    }
+
+    const chunkIndex = currentChunkIndexRef.current;
+
+    setChunks((previousChunks) => {
+      if (!previousChunks[chunkIndex]) {
+        return previousChunks;
       }
-      return prev;
+
+      if (previousChunks[chunkIndex].duration === audio.duration) {
+        return previousChunks;
+      }
+
+      const nextChunks = [...previousChunks];
+      nextChunks[chunkIndex] = {
+        ...nextChunks[chunkIndex],
+        duration: audio.duration,
+      };
+      chunksRef.current = nextChunks;
+      return nextChunks;
     });
   }
 
   function handleTimeUpdate() {
     const audio = audioRef.current;
-    if (!audio) return;
+
+    if (!audio) {
+      return;
+    }
+
     setChunkCurrentTime(audio.currentTime);
   }
 
   function handleChunkEnded() {
     invalidatePlayRequests();
-    const nextIndex = currentChunkIndexRef.current + 1;
-    setCurrentChunkIndex(nextIndex);
-    currentChunkIndexRef.current = nextIndex;
+    const nextChunkIndex = currentChunkIndexRef.current + 1;
+
+    setCurrentChunkIndex(nextChunkIndex);
+    currentChunkIndexRef.current = nextChunkIndex;
     setChunkCurrentTime(0);
 
-    if (chunksRef.current[nextIndex]) {
-      playChunk(nextIndex);
-    } else if (nextIndex < (totalChunks || Infinity)) {
-      waitingForNextChunk.current = true;
-    } else {
-      setIsPlaying(false);
-      setCurrentChunkIndex(0);
-      currentChunkIndexRef.current = 0;
-      setChunkCurrentTime(0);
+    if (chunksRef.current[nextChunkIndex]) {
+      playChunk(nextChunkIndex);
+      return;
     }
+
+    if (nextChunkIndex < (totalChunks || Number.POSITIVE_INFINITY)) {
+      waitingForNextChunkRef.current = true;
+      return;
+    }
+
+    setIsPlaying(false);
+    setCurrentChunkIndex(0);
+    currentChunkIndexRef.current = 0;
+    setChunkCurrentTime(0);
   }
 
-  function handleSeek(e: React.ChangeEvent<HTMLInputElement>) {
-    const seekTo = Number(e.target.value);
-    if (!chunks.length) return;
+  function handleSeek(event: React.ChangeEvent<HTMLInputElement>) {
+    const nextOverallTime = Number(event.target.value);
 
-    // Find which chunk this time falls in
-    let targetChunk = 0;
-    let timeInChunk = seekTo;
-    for (let i = 0; i < chunks.length; i++) {
-      if (timeInChunk < chunks[i].duration || i === chunks.length - 1) {
-        targetChunk = i;
+    if (chunks.length === 0) {
+      return;
+    }
+
+    let nextChunkIndex = 0;
+    let chunkTime = nextOverallTime;
+
+    for (let index = 0; index < chunks.length; index += 1) {
+      if (chunkTime < chunks[index].duration || index === chunks.length - 1) {
+        nextChunkIndex = index;
         break;
       }
-      timeInChunk -= chunks[i].duration;
+
+      chunkTime -= chunks[index].duration;
     }
 
-    if (targetChunk !== currentChunkIndex) {
-      setCurrentChunkIndex(targetChunk);
-      currentChunkIndexRef.current = targetChunk;
-      const chunk = chunks[targetChunk];
-      if (audioRef.current && chunk) {
-        audioRef.current.src = chunk.audioUrl;
-        audioRef.current.playbackRate = playbackRate;
-        audioRef.current.currentTime = Math.max(0, Math.min(timeInChunk, chunk.duration - 0.01));
-        if (isPlaying) void safePlayAudio();
+    if (nextChunkIndex !== currentChunkIndex) {
+      setCurrentChunkIndex(nextChunkIndex);
+      currentChunkIndexRef.current = nextChunkIndex;
+    }
+
+    const audio = audioRef.current;
+    const chunk = chunks[nextChunkIndex];
+
+    if (audio && chunk) {
+      if (audio.src !== chunk.audioUrl) {
+        audio.src = chunk.audioUrl;
       }
-    } else if (audioRef.current) {
-      audioRef.current.currentTime = Math.max(0, Math.min(timeInChunk, chunks[targetChunk].duration - 0.01));
+
+      audio.playbackRate = playbackRate;
+      audio.currentTime = Math.max(0, Math.min(chunkTime, Math.max(0, chunk.duration - 0.01)));
+
+      if (isPlaying) {
+        void safePlayAudio();
+      }
     }
 
-    setChunkCurrentTime(timeInChunk);
+    setChunkCurrentTime(chunkTime);
   }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const trimmedText = normalizedInputText;
+
     if (!trimmedText) {
       setError("Paste something first.");
       return;
     }
 
-    chunksRef.current.forEach((c) => URL.revokeObjectURL(c.audioUrl));
+    chunksRef.current.forEach((chunk) => URL.revokeObjectURL(chunk.audioUrl));
 
     setError(null);
     setIsLoading(true);
@@ -271,7 +403,7 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
     setTotalChunks(0);
     setActiveEntryId(null);
     setChunkCurrentTime(0);
-    waitingForNextChunk.current = false;
+    waitingForNextChunkRef.current = false;
     invalidatePlayRequests();
 
     try {
@@ -290,39 +422,65 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
       const decoder = new TextDecoder();
       let buffer = "";
       let firstChunkPlayed = false;
-      const generatedChunks: SavedChunk[] = [];
+      const savedChunks: SavedChunk[] = [];
 
       while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done) {
+          break;
+        }
 
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split("\n");
         buffer = lines.pop() ?? "";
 
         for (const line of lines) {
-          if (!line.trim()) continue;
-          const data = JSON.parse(line);
-          if (data.error) throw new Error(data.error);
+          if (!line.trim()) {
+            continue;
+          }
+
+          const data = JSON.parse(line) as ReaderResponseChunk;
+
+          if (data.error) {
+            throw new Error(data.error);
+          }
 
           const blob = base64ToBlob(data.audioBase64, data.mimeType);
           const audioUrl = URL.createObjectURL(blob);
-          const newChunk: AudioChunk = {
-            audioUrl,
-            audioBlob: blob,
-            tokens: data.tokens ?? [],
-            duration: 0, // Will be set when audio loads
+          const track: ChunkTrack = {
+            displayTokens: data.displayTokens ?? [],
+            timedWords: data.timedWords ?? [],
+            blocks: data.blocks ?? [],
+            durationSeconds: data.durationSeconds ?? 0,
+            quality: data.quality ?? {
+              coverage: 0,
+              interpolatedWordCount: 0,
+            },
           };
-          generatedChunks.push({
+
+          const duration =
+            track.durationSeconds > 0 ? track.durationSeconds : await probeDuration(audioUrl);
+          const newChunk: AudioChunk = {
             audioBlob: blob,
-            tokens: data.tokens ?? [],
+            audioUrl,
+            duration,
+            track,
+          };
+
+          savedChunks.push({
+            audioBlob: blob,
+            displayTokens: track.displayTokens,
+            timedWords: track.timedWords,
+            blocks: track.blocks,
+            durationSeconds: duration,
+            quality: track.quality,
           });
 
           setTotalChunks(data.totalChunks);
-          setChunks((prev) => {
-            const next = [...prev, newChunk];
-            chunksRef.current = next;
-            return next;
+          setChunks((previousChunks) => {
+            const nextChunks = [...previousChunks, newChunk];
+            chunksRef.current = nextChunks;
+            return nextChunks;
           });
 
           if (!firstChunkPlayed) {
@@ -335,14 +493,23 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
           }
         }
       }
+
       setIsStreaming(false);
-      if (generatedChunks.length > 0) {
+
+      if (savedChunks.length > 0) {
         setIsAutoSaving(true);
-        const savedId = await saveLibraryEntry(trimmedText, selectedVoice, generatedChunks);
-        if (savedId) {
-          setActiveEntryId(savedId);
+        const savedEntryId = await saveLibraryEntry(
+          trimmedText,
+          selectedVoice,
+          savedChunks,
+          chunksRef.current.reduce((sum, chunk) => sum + chunk.duration, 0),
+        );
+
+        if (savedEntryId) {
+          setActiveEntryId(savedEntryId);
           await fetchLibrary();
         }
+
         setIsAutoSaving(false);
       }
     } catch (caughtError) {
@@ -356,7 +523,10 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
 
   function togglePlayback() {
     const audio = audioRef.current;
-    if (!audio) return;
+
+    if (!audio) {
+      return;
+    }
 
     if (audio.paused) {
       if (!audio.src && chunks[0]) {
@@ -367,10 +537,12 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
       } else {
         void safePlayAudio();
       }
-    } else {
-      invalidatePlayRequests();
-      audio.pause();
+
+      return;
     }
+
+    invalidatePlayRequests();
+    audio.pause();
   }
 
   function handleNew() {
@@ -379,9 +551,9 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
     audioRef.current?.removeAttribute("src");
     audioRef.current?.load();
 
-    chunksRef.current.forEach((c) => URL.revokeObjectURL(c.audioUrl));
+    chunksRef.current.forEach((chunk) => URL.revokeObjectURL(chunk.audioUrl));
     chunksRef.current = [];
-    waitingForNextChunk.current = false;
+    waitingForNextChunkRef.current = false;
 
     setText("");
     setSelectedVoice(DEFAULT_VOICE);
@@ -399,51 +571,70 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
     setChunkCurrentTime(0);
   }
 
-  async function saveLibraryEntry(textToSave: string, voiceToSave: TtsVoice, savedChunks: SavedChunk[]) {
-    setIsSaving(true);
+  async function saveLibraryEntry(
+    textToSave: string,
+    voiceToSave: TtsVoice,
+    savedChunks: SavedChunk[],
+    durationSeconds?: number,
+  ) {
     try {
       const entry = await saveLibraryStoreEntry({
         text: textToSave,
         voice: voiceToSave,
         chunks: savedChunks,
+        durationSeconds,
       });
+
       return entry.id;
     } catch {
       setError("Could not save to library.");
       return null;
-    } finally {
-      setIsSaving(false);
     }
   }
 
-  async function handleSave() {
-    if (!hasAudio || isSaving) return;
-    const savedId = await saveLibraryEntry(
-      lastRenderedText,
-      lastRenderedVoice,
-      chunks.map((c) => ({ audioBlob: c.audioBlob, tokens: c.tokens })),
-    );
-    if (savedId) {
-      setActiveEntryId(savedId);
-      await fetchLibrary();
-    }
-  }
-
-  async function handleLoadEntry(id: string) {
+  const handleLoadEntry = useCallback(async (id: string) => {
     invalidatePlayRequests();
     audioRef.current?.pause();
-    chunksRef.current.forEach((c) => URL.revokeObjectURL(c.audioUrl));
+    chunksRef.current.forEach((chunk) => URL.revokeObjectURL(chunk.audioUrl));
 
     try {
       const entry = await getLibraryEntry(id);
-      if (!entry) throw new Error("Not found");
+      if (!entry) {
+        throw new Error("Not found");
+      }
 
-      const loadedChunks: AudioChunk[] = entry.chunks.map((c: SavedChunk) => ({
-        audioUrl: URL.createObjectURL(c.audioBlob),
-        audioBlob: c.audioBlob,
-        tokens: c.tokens,
-        duration: 0,
-      }));
+      const loadedChunks: AudioChunk[] = await Promise.all(
+        entry.chunks.map(async (savedChunk, chunkIndex) => {
+          const audioUrl = URL.createObjectURL(savedChunk.audioBlob);
+          const track = inflateSavedChunkTrack(savedChunk, chunkIndex);
+          const duration =
+            savedChunk.durationSeconds ??
+            (track.durationSeconds || await probeDuration(audioUrl));
+
+          return {
+            audioBlob: savedChunk.audioBlob,
+            audioUrl,
+            duration,
+            track: {
+              ...track,
+              durationSeconds: duration,
+            },
+          };
+        }),
+      );
+
+      const savedProgress = entry.progressSeconds ?? 0;
+      let targetChunkIndex = 0;
+      let timeInChunk = savedProgress;
+
+      for (let index = 0; index < loadedChunks.length; index += 1) {
+        if (timeInChunk < loadedChunks[index].duration || index === loadedChunks.length - 1) {
+          targetChunkIndex = index;
+          break;
+        }
+
+        timeInChunk -= loadedChunks[index].duration;
+      }
 
       setText(entry.text);
       setSelectedVoice(entry.voice);
@@ -451,29 +642,58 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
       setLastRenderedVoice(entry.voice);
       setChunks(loadedChunks);
       chunksRef.current = loadedChunks;
-      setCurrentChunkIndex(0);
-      currentChunkIndexRef.current = 0;
+      setCurrentChunkIndex(targetChunkIndex);
+      currentChunkIndexRef.current = targetChunkIndex;
       setTotalChunks(loadedChunks.length);
       setActiveEntryId(id);
       setError(null);
       setIsPlaying(false);
-      setChunkCurrentTime(0);
+      setChunkCurrentTime(timeInChunk);
       setSidebarOpen(false);
+      lastSavedProgressRef.current = savedProgress;
 
-      if (audioRef.current && loadedChunks[0]) {
-        audioRef.current.src = loadedChunks[0].audioUrl;
+      if (!entry.durationSeconds) {
+        const actualDuration = loadedChunks.reduce((sum, chunk) => sum + chunk.duration, 0);
+
+        if (actualDuration > 0) {
+          void updateEntryDuration(id, actualDuration)
+            .then(() => fetchLibrary())
+            .catch(() => {});
+        }
+      }
+
+      if (audioRef.current && loadedChunks[targetChunkIndex]) {
+        audioRef.current.src = loadedChunks[targetChunkIndex].audioUrl;
         audioRef.current.playbackRate = playbackRate;
-        audioRef.current.currentTime = 0;
+        audioRef.current.currentTime = Math.max(0, timeInChunk);
       }
     } catch {
       setError("Could not load article.");
     }
-  }
+  }, [fetchLibrary, playbackRate]);
+
+  useEffect(() => {
+    const entryId = initialEntryId ?? (window.location.hash.slice(1) || null);
+    initialEntryIdRef.current = entryId;
+    setIsRestoringEntry(Boolean(entryId));
+
+    void Promise.all([
+      fetchLibrary(),
+      entryId ? handleLoadEntry(entryId).catch(() => {}) : Promise.resolve(),
+    ]).finally(() => {
+      initialEntryIdRef.current = null;
+      setIsRestoringEntry(false);
+    });
+  }, [fetchLibrary, handleLoadEntry, initialEntryId]);
 
   async function handleDeleteEntry(id: string) {
     try {
       await deleteLibraryEntry(id);
-      if (activeEntryId === id) setActiveEntryId(null);
+
+      if (activeEntryId === id) {
+        setActiveEntryId(null);
+      }
+
       await fetchLibrary();
     } catch {
       setError("Could not delete article.");
@@ -483,9 +703,13 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
   async function handleSignOut() {
     setError(null);
     setIsSigningOut(true);
+
     try {
       const response = await fetch("/api/auth", { method: "DELETE" });
-      if (!response.ok) throw new Error("Could not sign out.");
+      if (!response.ok) {
+        throw new Error("Could not sign out.");
+      }
+
       router.refresh();
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "Could not sign out.");
@@ -494,12 +718,13 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
     }
   }
 
-  // Show player mode when we have audio (not stale)
-  const showPlayer = hasAudio || isLoading;
+  const showPlayer = hasAudio || isLoading || isRestoringEntry;
+  const focusPlaceholderText = isLoading
+    ? "Generating audio and timing track..."
+    : "Restoring saved article...";
 
   return (
-    <div className="flex min-h-screen">
-      {/* Sidebar */}
+    <div className="flex h-screen overflow-hidden">
       <aside
         className={`fixed inset-y-0 left-0 z-30 flex w-72 flex-col border-r border-border bg-[#f5f0e8] transition-transform duration-200 ${
           sidebarOpen ? "translate-x-0" : "-translate-x-full"
@@ -518,7 +743,11 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
         </div>
 
         <div className="flex-1 overflow-y-auto">
-          {library.length === 0 ? (
+          {isLibraryLoading ? (
+            <p className="px-4 py-8 text-center text-xs text-muted">
+              Loading library...
+            </p>
+          ) : library.length === 0 ? (
             <p className="px-4 py-8 text-center text-xs text-muted">
               No saved articles yet
             </p>
@@ -528,9 +757,7 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
                 <li
                   key={item.id}
                   className={`group flex items-start gap-2 px-4 py-3 transition ${
-                    activeEntryId === item.id
-                      ? "bg-white/70"
-                      : "hover:bg-white/40"
+                    activeEntryId === item.id ? "bg-white/70" : "hover:bg-white/40"
                   }`}
                 >
                   <button
@@ -543,7 +770,7 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
                     <p className="mt-1 text-xs text-muted">
                       {item.voice} &middot;{" "}
                       {new Date(item.createdAt).toLocaleDateString()} &middot;{" "}
-                      {item.charCount.toLocaleString()} chars
+                      {formatTime(item.durationSeconds ?? estimateDurationFromCharCount(item.charCount))}
                     </p>
                   </button>
                   <button
@@ -562,7 +789,6 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
         </div>
       </aside>
 
-      {/* Sidebar overlay on mobile */}
       {sidebarOpen && (
         <div
           className="fixed inset-0 z-20 bg-black/20 lg:hidden"
@@ -570,9 +796,7 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
         />
       )}
 
-      {/* Main content */}
-      <main className="flex w-full flex-1 flex-col">
-        {/* Top bar */}
+      <main className="flex w-full min-h-0 flex-1 flex-col">
         <header className="flex items-center gap-3 border-b border-border px-5 py-3 sm:px-8">
           <button
             onClick={() => setSidebarOpen(!sidebarOpen)}
@@ -586,14 +810,6 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
           <h1 className="font-serif text-xl tracking-tight">Reader</h1>
 
           <div className="ml-auto flex items-center gap-2">
-            {library.length > 0 && (
-              <button
-                onClick={() => setSidebarOpen(!sidebarOpen)}
-                className="hidden items-center gap-1.5 text-xs text-muted underline decoration-dotted underline-offset-2 transition hover:text-foreground lg:flex"
-              >
-                {library.length} saved
-              </button>
-            )}
             {hasAudio && (
               <button
                 type="button"
@@ -616,74 +832,74 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
           </div>
         </header>
 
-        {/* Hidden audio element */}
         <audio
           ref={audioRef}
           className="hidden"
           onPlay={() => setIsPlaying(true)}
-          onPause={() => setIsPlaying(false)}
+          onPause={() => {
+            setIsPlaying(false);
+
+            if (activeEntryId) {
+              const currentTime = (chunkStartTimes[currentChunkIndexRef.current] ?? 0) + (audioRef.current?.currentTime ?? 0);
+              lastSavedProgressRef.current = currentTime;
+              void updateEntryProgress(activeEntryId, currentTime).catch(() => {});
+            }
+          }}
           onEnded={handleChunkEnded}
-          onTimeUpdate={handleTimeUpdate}
           onLoadedMetadata={handleLoadedMetadata}
+          onTimeUpdate={handleTimeUpdate}
         />
 
         {showPlayer ? (
-          /* ── Player Mode ── */
-          <div className="flex flex-1 flex-col" style={{ paddingBottom: "5.5rem" }}>
-            {/* Scrollable text */}
-            <div className="reading-scroll flex-1 overflow-y-auto px-5 py-8 sm:px-12 sm:py-12 lg:px-20">
-              <div className="mx-auto max-w-2xl">
-                {title && (
-                  <h2 className="mb-6 font-serif text-2xl font-medium leading-snug tracking-tight text-foreground sm:text-3xl">
-                    {title}
-                  </h2>
-                )}
-                <div className="font-serif text-lg leading-[1.9] tracking-[0.005em] text-foreground/80 whitespace-pre-wrap sm:text-xl sm:leading-[2]">
-                  {lastRenderedText || text}
-                </div>
-              </div>
-            </div>
+          <div className="flex min-h-0 flex-1 flex-col" style={{ paddingBottom: "5.5rem" }}>
+            <FocusReader
+              audioRef={audioRef}
+              chunkStartTimes={chunkStartTimes}
+              currentChunkIndexRef={currentChunkIndexRef}
+              isPlaying={isPlaying}
+              key={activeEntryId ?? lastRenderedText ?? text ?? "focus-reader"}
+              placeholderText={focusPlaceholderText}
+              title={title}
+              track={hydratedTrack}
+            />
 
-            {/* ── Bottom Player Bar ── */}
-            <div className="fixed inset-x-0 bottom-0 z-10 border-t border-border bg-[#faf6f0]/95 backdrop-blur-sm">
-              {/* Progress bar */}
+            <div className="fixed bottom-0 left-0 right-0 z-10 border-t border-border bg-[#faf6f0]/95 backdrop-blur-sm lg:left-72">
               <div className="relative h-1 w-full bg-border">
                 <div
-                  className="absolute inset-y-0 left-0 bg-foreground/70 transition-[width] duration-200"
+                  className="absolute inset-y-0 left-0 bg-foreground/70 transition-[width] duration-150"
                   style={{
                     width: totalDuration > 0 ? `${(overallTime / totalDuration) * 100}%` : "0%",
                   }}
                 />
                 <input
                   ref={progressRef}
-                  type="range"
-                  min={0}
-                  max={totalDuration || 1}
-                  step={0.1}
-                  value={overallTime}
-                  onChange={handleSeek}
                   className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
                   disabled={!hasAudio || totalDuration === 0}
+                  max={totalDuration || 1}
+                  min={0}
+                  onChange={handleSeek}
+                  step={0.1}
+                  type="range"
+                  value={overallTime}
                 />
               </div>
 
               <div className="flex items-center gap-4 px-5 py-3 sm:px-8">
-                {/* Left: time */}
-                <span className="w-20 text-xs tabular-nums text-muted">
-                  {formatTime(overallTime)} / {formatTime(totalDuration)}
+                <span className="w-24 text-xs tabular-nums text-muted">
+                  {formatTime(overallTime / playbackRate)} / {formatTime(totalDuration / playbackRate)}
                 </span>
 
-                {/* Center: controls */}
                 <div className="flex flex-1 items-center justify-center gap-3">
-                  {/* Rewind 15s */}
                   <button
                     type="button"
                     onClick={() => {
-                      if (audioRef.current) {
-                        const newTime = Math.max(0, audioRef.current.currentTime - 15);
-                        audioRef.current.currentTime = newTime;
-                        setChunkCurrentTime(newTime);
+                      if (!audioRef.current) {
+                        return;
                       }
+
+                      const nextTime = Math.max(0, audioRef.current.currentTime - 15);
+                      audioRef.current.currentTime = nextTime;
+                      setChunkCurrentTime(nextTime);
                     }}
                     disabled={!hasAudio}
                     className="flex h-9 w-9 items-center justify-center rounded-full text-muted transition hover:text-foreground disabled:opacity-30"
@@ -695,7 +911,6 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
                     </svg>
                   </button>
 
-                  {/* Play/Pause */}
                   {isLoading ? (
                     <div className="flex h-12 w-12 items-center justify-center rounded-full bg-foreground text-white">
                       <svg className="animate-spin" width="20" height="20" viewBox="0 0 24 24" fill="none">
@@ -722,18 +937,19 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
                     </button>
                   )}
 
-                  {/* Forward 15s */}
                   <button
                     type="button"
                     onClick={() => {
-                      if (audioRef.current && chunks[currentChunkIndex]) {
-                        const newTime = Math.min(
-                          chunks[currentChunkIndex].duration,
-                          audioRef.current.currentTime + 15,
-                        );
-                        audioRef.current.currentTime = newTime;
-                        setChunkCurrentTime(newTime);
+                      if (!audioRef.current || !chunks[currentChunkIndex]) {
+                        return;
                       }
+
+                      const nextTime = Math.min(
+                        chunks[currentChunkIndex].duration,
+                        audioRef.current.currentTime + 15,
+                      );
+                      audioRef.current.currentTime = nextTime;
+                      setChunkCurrentTime(nextTime);
                     }}
                     disabled={!hasAudio}
                     className="flex h-9 w-9 items-center justify-center rounded-full text-muted transition hover:text-foreground disabled:opacity-30"
@@ -746,8 +962,7 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
                   </button>
                 </div>
 
-                {/* Right: speed + status */}
-                <div className="flex w-20 items-center justify-end gap-2">
+                <div className="flex w-24 items-center justify-end gap-2">
                   {isStreaming && (
                     <span className="text-xs text-accent">
                       {chunks.length}/{totalChunks}
@@ -763,12 +978,12 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
                   )}
                   <select
                     value={playbackRate}
-                    onChange={(e) => setPlaybackRate(Number(e.target.value))}
+                    onChange={(event) => setPlaybackRate(Number(event.target.value))}
                     className="h-7 rounded border border-border bg-transparent px-1 text-xs text-foreground outline-none"
                   >
-                    {[0.5, 0.75, 1, 1.25, 1.5, 1.75, 2].map((r) => (
-                      <option key={r} value={r}>
-                        {r}x
+                    {[0.5, 0.75, 1, 1.25, 1.5, 1.75, 2].map((rate) => (
+                      <option key={rate} value={rate}>
+                        {rate}x
                       </option>
                     ))}
                   </select>
@@ -777,7 +992,6 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
             </div>
           </div>
         ) : (
-          /* ── Input Mode ── */
           <div className="mx-auto flex w-full max-w-2xl flex-1 flex-col justify-center px-5 py-12 sm:py-20">
             <div className="mb-8 text-center">
               <h2 className="font-serif text-3xl tracking-tight sm:text-4xl">
@@ -791,7 +1005,7 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
             <form onSubmit={handleSubmit} className="flex flex-col gap-4">
               <textarea
                 value={text}
-                onChange={(e) => setText(e.target.value)}
+                onChange={(event) => setText(event.target.value)}
                 placeholder={PLACEHOLDER}
                 className="min-h-[180px] w-full resize-y rounded-xl border border-border bg-white px-5 py-4 font-serif text-[1.05rem] leading-7 text-foreground outline-none transition placeholder:font-sans focus:border-accent focus:ring-2 focus:ring-accent/20"
               />
@@ -799,12 +1013,12 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
               <div className="flex flex-wrap items-center gap-3">
                 <select
                   value={selectedVoice}
-                  onChange={(e) => setSelectedVoice(e.target.value as TtsVoice)}
+                  onChange={(event) => setSelectedVoice(event.target.value as TtsVoice)}
                   className="h-10 rounded-lg border border-border bg-white px-3 text-sm text-foreground outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/20"
                 >
-                  {TTS_VOICES.map((v) => (
-                    <option key={v.id} value={v.id}>
-                      {v.name} — {v.tone}
+                  {TTS_VOICES.map((voice) => (
+                    <option key={voice.id} value={voice.id}>
+                      {voice.name} — {voice.tone}
                     </option>
                   ))}
                 </select>
@@ -824,26 +1038,11 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
 
                 <span className="ml-auto text-xs text-muted">
                   {charCount.toLocaleString()} chars
+                  {hasText && (
+                    <> · ~{formatTime(costEstimate.durationSeconds)}</>
+                  )}
                 </span>
               </div>
-
-              {/* Cost toggle */}
-              {hasText && (
-                <div className="flex items-center gap-3">
-                  <button
-                    type="button"
-                    onClick={() => setShowCost(!showCost)}
-                    className="text-xs text-muted underline decoration-dotted underline-offset-2 transition hover:text-foreground"
-                  >
-                    {showCost ? "hide estimate" : "~" + formatTime(costEstimate.durationSeconds) + " listen time"}
-                  </button>
-                  {showCost && (
-                    <span className="text-xs text-muted">
-                      ~${costEstimate.totalCost.toFixed(4)} cost
-                    </span>
-                  )}
-                </div>
-              )}
 
               {error && (
                 <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-2.5 text-sm text-red-700">
@@ -852,7 +1051,6 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
               )}
             </form>
 
-            {/* Empty state */}
             {!hasText && (
               <div className="mt-12 flex flex-col items-center text-center text-muted">
                 <svg width="48" height="48" viewBox="0 0 48 48" fill="none" className="mb-4 opacity-20">
@@ -865,9 +1063,8 @@ export function ReaderApp({ passwordProtected = false }: ReaderAppProps) {
           </div>
         )}
 
-        {/* Error in player mode */}
         {showPlayer && error && (
-          <div className="fixed top-16 left-1/2 z-20 -translate-x-1/2">
+          <div className="fixed left-1/2 top-16 z-20 -translate-x-1/2">
             <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-2.5 text-sm text-red-700 shadow-lg">
               {error}
             </p>
