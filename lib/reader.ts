@@ -115,7 +115,7 @@ type WorkingDisplayToken = Omit<DisplayToken, "blockIndex">;
 const TOKEN_PATTERN = /(\n{2,}|\s+|[^\s]+)/g;
 const DEFAULT_BLOCK_HEIGHT = 156;
 const BLOCK_TARGET_WORDS = 36;
-const BLOCK_MAX_WORDS = 52;
+const BLOCK_MAX_WORDS = 80;
 
 export function normalizeWord(value: string) {
   return value
@@ -483,11 +483,9 @@ function buildBlocks(displayTokens: DisplayToken[]): ReaderBlock[] {
 
     const isLastToken = tokenIndex === displayTokens.length - 1;
     const hasHardBreak = token.kind === "space" && token.value.includes("\n\n");
-    const hasSoftBreak =
-      token.kind === "word" &&
-      wordsInBlock >= BLOCK_TARGET_WORDS &&
-      /[.!?;:]$/.test(token.value);
-    const exceededMaxWords = wordsInBlock >= BLOCK_MAX_WORDS;
+    const isSentenceEnd = token.kind === "word" && /[.!?]["'\u201D\u2019)]*$/.test(token.value);
+    const hasSoftBreak = isSentenceEnd && wordsInBlock >= BLOCK_TARGET_WORDS;
+    const exceededMaxWords = isSentenceEnd && wordsInBlock >= BLOCK_MAX_WORDS;
 
     if (hasHardBreak) {
       pushBlock(tokenIndex);
