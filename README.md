@@ -1,49 +1,97 @@
 # Reader
 
-Paste text into a simple Next.js app, generate OpenAI text-to-speech audio, and follow along with live word highlighting while it plays.
+Reader is a small Next.js app for turning pasted text into OpenAI-generated speech, then following along with word-level highlighting while the audio plays.
+
+Copyright (c) 2026 Andrew Hyde. Released under the [MIT License](./LICENSE).
+
+## What It Does
+
+- Generates text-to-speech audio with OpenAI
+- Aligns spoken audio back to the original text for live highlighting
+- Lets you preview built-in voices before generating a full reading
+- Saves readings locally in the current browser with IndexedDB
+
+This repository is an open-source app, not an npm package. `package.json` intentionally remains `"private": true`.
 
 ## Stack
 
-- Next.js App Router
+- Next.js 16 App Router
+- React 19
 - Tailwind CSS v4
 - OpenAI Node SDK
-- `pnpm`
+- pnpm
 
-## Setup
+## Requirements
 
-1. Install dependencies:
+- Node.js `>=20.9.0`
+- pnpm `>=10`
+- An OpenAI API key with access to text-to-speech and transcription models
 
-```bash
-pnpm install
-```
+The current repo is tested locally with Node `20.19.4` and pnpm `10.28.2`.
 
-2. Add your API key and optional app password:
+## Environment Variables
+
+Copy the example file and create a local env file:
 
 ```bash
 cp .env.example .env.local
 ```
 
-Set `READER_PASSWORD` in `.env.local` if you want the app locked behind a shared password. When configured, the password is checked on the server and successful logins receive an `HttpOnly` session cookie.
+Supported variables:
 
-3. Start the app:
+- `OPENAI_API_KEY` (required): used by the server routes that call OpenAI
+- `READER_PASSWORD` (optional): enables a shared-password gate backed by an `HttpOnly` cookie
+
+## Local Development
+
+Install dependencies:
+
+```bash
+pnpm install
+```
+
+Start the app:
 
 ```bash
 pnpm dev
 ```
 
-4. Open [http://localhost:3000](http://localhost:3000)
+Open [http://localhost:3000](http://localhost:3000).
 
-## Features
+## Scripts
 
-- Pick from the built-in OpenAI TTS voices and preview each one before generating a full reading
-- Generate a spoken version of the pasted text with live word highlighting
-- Save your library locally in the current browser with IndexedDB, including generated audio chunks
-- See an estimated per-reading API cost, including both speech generation and the transcription pass used for word timing
+- `pnpm dev`: run the local development server
+- `pnpm lint`: run ESLint
+- `pnpm test`: run the Vitest suite
+- `pnpm build`: build the production app
 
-## Notes
+## Privacy and Cost Notes
 
-- The server uses `gpt-4o-mini-tts` with a calm voice prompt.
-- Word highlighting is produced by transcribing the generated audio with `whisper-1` word timestamps, then aligning those timestamps back onto the original pasted text.
-- The app currently enforces a 4,000-character input cap because the installed OpenAI SDK type for `v1/audio/speech` documents a 4,096-character max input, while the current `gpt-4o-mini-tts` model page separately says the model supports up to 2,000 input tokens.
-- Cost estimates are based on the current OpenAI pricing page: `gpt-4o-mini-tts` text input at `$0.60 / 1M tokens`, speech output estimated at `$0.015 / minute`, and `whisper-1` transcription at `$0.006 / minute`.
-- Saved articles now live in browser IndexedDB, so they persist across reloads on the same browser/device but do not sync across devices.
+- Pasted text is sent to OpenAI when you generate a preview or a full reading.
+- Generated readings are stored in the current browser's IndexedDB. They do not sync across devices.
+- Running the app spends the API credits for the `OPENAI_API_KEY` configured on the server.
+- Cost estimates shown in the UI are only estimates. They are based on assumptions in [lib/costs.ts](/Users/andrewhyde/chat/reader/lib/costs.ts) and may drift from current vendor pricing.
+
+## Product Limitations
+
+- The optional password gate is suitable for light personal protection, not public multi-user hosting.
+- Word alignment currently assumes English transcription via `whisper-1`.
+- The app enforces a 4,000-character input cap in the UI and request flow.
+- Saved readings are browser-local only.
+- Read mode depends on OpenAI successfully generating both speech and transcription timestamps.
+
+## Maintainer Notes
+
+Current server routes:
+
+- `POST /api/auth`: validate the optional shared password and set the session cookie
+- `DELETE /api/auth`: clear the session cookie
+- `POST /api/read`: generate preview audio or a full streamed reading
+
+If you plan to host a public demo, add rate limiting, stronger authentication, request-size controls, and clearer abuse monitoring before exposing the API to the internet.
+
+Before making the repository public, review git history for any previously committed secrets or private content, even if the current working tree is clean.
+
+## Contributing
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for development expectations, pull request guidance, and the pre-publication checklist.
